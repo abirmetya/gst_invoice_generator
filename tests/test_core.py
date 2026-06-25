@@ -1,6 +1,5 @@
 from gst_invoice_generator.core import (
     build_folder_paths,
-    sheet_is_in_requested_range,
     extract_iob_amount,
     normalize_rows,
     row_to_bank_sale,
@@ -40,9 +39,9 @@ def test_row_to_bank_sale_treats_bank_amount_as_gst_inclusive():
 
 
 def test_build_folder_paths():
-    assert build_folder_paths("Google_Business_Data/Daily_Operation", 2026, 1, 2) == [
-        "Google_Business_Data/Daily_Operation/01-January",
-        "Google_Business_Data/Daily_Operation/02-February",
+    assert build_folder_paths("Finance", 2026, 1, 2) == [
+        "Finance/2026/01_january",
+        "Finance/2026/02_february",
     ]
 
 
@@ -52,10 +51,3 @@ def test_normalize_rows_includes_unnamed_column_after_remarks():
         ["2026-06-24", "1", "Name", "Addr", "Item", "1", "kg", "10", "10", "10", "0", "R", "cash", "IOB-10"],
     ])
     assert rows[0]["Unnamed_Remarks"] == "IOB-10"
-
-
-def test_sheet_date_filter_keeps_only_requested_year_and_months():
-    assert sheet_is_in_requested_range("Daily_Operations_2026-04-15", 2026, 4, 6)
-    assert not sheet_is_in_requested_range("Daily_Operations_2025-04-15", 2026, 4, 6)
-    assert not sheet_is_in_requested_range("Daily_Operations_2026-07-01", 2026, 4, 6)
-    assert sheet_is_in_requested_range("Manual_Adjustment", 2026, 4, 6)

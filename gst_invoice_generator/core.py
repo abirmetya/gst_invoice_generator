@@ -16,10 +16,9 @@ CGST_RATE = 0.025
 SGST_RATE = 0.025
 IOB_PATTERN = re.compile(r"\bIOB(?:\s*[-:]\s*([0-9][0-9,]*(?:\.\d+)?))?\b", re.IGNORECASE)
 MONTH_NAMES = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
 ]
-SHEET_DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 SALES_COLUMNS = [
     "Entry_Date", "Phone", "Customer_Name", "Address", "Item_Type", "Qty_Ordered",
     "Unit", "Rate", "Order_Value", "Paid_Amount", "Due_Amount", "Order_Ref", "Remarks",
@@ -131,24 +130,12 @@ def row_to_bank_sale(row: dict[str, Any], source_sheet: str, company_selling_add
 
 
 def month_folder_name(month: int) -> str:
-    return f"{month:02d}-{MONTH_NAMES[month - 1]}"
+    return f"{month:02d}_{MONTH_NAMES[month - 1]}"
 
 
 def build_folder_paths(root_drive_path: str, year: int, start_month: int, end_month: int) -> list[str]:
     root = root_drive_path.strip("/")
-    return [f"{root}/{month_folder_name(month)}" for month in range(start_month, end_month + 1)]
-
-
-def sheet_date_from_name(sheet_name: str) -> date | None:
-    match = SHEET_DATE_PATTERN.search(sheet_name)
-    return parse_date(match.group(1)) if match else None
-
-
-def sheet_is_in_requested_range(sheet_name: str, year: int, start_month: int, end_month: int) -> bool:
-    sheet_date = sheet_date_from_name(sheet_name)
-    if sheet_date is None:
-        return True
-    return sheet_date.year == year and start_month <= sheet_date.month <= end_month
+    return [f"{root}/{year}/{month_folder_name(month)}" for month in range(start_month, end_month + 1)]
 
 
 class GoogleSheetReader:
@@ -183,7 +170,7 @@ class GoogleSheetReader:
     def spreadsheet_ids_in_folder(self, folder_id: str) -> list[tuple[str, str]]:
         q = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
         result = self.drive.files().list(q=q, fields="files(id, name)", pageSize=1000).execute()
-        return sorted((f["id"], f["name"]) for f in result.get("files", []))
+        return sorted((f["id"], f["name"]) for f in result.get("files", []) if f.get("name", "").startswith("Daily_Operations_"))
 
     def read_sales_values(self, spreadsheet_id: str) -> list[list[Any]]:
         result = self.sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="SALES_ENTRY!A:N").execute()
@@ -195,8 +182,6 @@ def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, st
     for folder_path in build_folder_paths(drive_path, year, start_month, end_month):
         folder_id = reader.folder_id_for_path(folder_path)
         for spreadsheet_id, sheet_name in reader.spreadsheet_ids_in_folder(folder_id):
-            if not sheet_is_in_requested_range(sheet_name, year, start_month, end_month):
-                continue
             rows = normalize_rows(reader.read_sales_values(spreadsheet_id))
             sales.extend(s for row in rows if (s := row_to_bank_sale(row, sheet_name, selling_address)))
     return sales
