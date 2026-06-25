@@ -2,6 +2,7 @@ import argparse
 import json
 
 from gst_invoice_generator.core import (
+    GoogleSheetReader,
     RequestConfig,
     build_folder_paths,
     config_with_cli_overrides,
@@ -11,6 +12,30 @@ from gst_invoice_generator.core import (
     normalize_rows,
     row_to_bank_sale,
 )
+
+
+class FakeDriveFiles:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def list(self, **kwargs):
+        self.calls.append(kwargs)
+        response = self.responses.pop(0)
+
+        class Request:
+            def execute(self):
+                return response
+
+        return Request()
+
+
+class FakeDrive:
+    def __init__(self, responses):
+        self.fake_files = FakeDriveFiles(responses)
+
+    def files(self):
+        return self.fake_files
 
 
 def test_extract_iob_amount_full_order_value():
@@ -118,3 +143,44 @@ def test_config_with_cli_overrides_only_replaces_provided_values():
     assert merged.end_month == 5
     assert merged.seller_name == "Override"
     assert merged.drive_path == "Google_Business_Data/Daily_Operation"
+
+
+def test_folder_lookup_searches_shared_drives():
+    reader = GoogleSheetReader.__new__(GoogleSheetReader)
+    reader.drive = FakeDrive([
+        {"files": [{"id": "root-folder", "name": "Google_Business_Data"}]},
+        {"files": [{"id": "daily-folder", "name": "Daily_Operation"}]},
+    ])
+
+    assert reader.folder_id_for_path("Google_Business_Data/Daily_Operation") == "daily-folder"
+
+    first_call = reader.drive.fake_files.calls[0]
+    assert first_call["supportsAllDrives"] is True
+    assert first_call["includeItemsFromAllDrives"] is True
+    assert first_call["corpora"] == "allDrives"
+
+
+def test_folder_lookup_error_includes_path_and_share_hint():
+    reader = GoogleSheetReader.__new__(GoogleSheetReader)
+    reader.drive = FakeDrive([{"files": []}])
+
+    try:
+        reader.folder_id_for_path("Google_Business_Data/Daily_Operation")
+    except FileNotFoundError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected FileNotFoundError")
+
+    assert "Could not find Drive folder path: Google_Business_Data" in message
+    assert "shared with the service account" in message
+
+
+def test_spreadsheet_lookup_searches_shared_drives():
+    reader = GoogleSheetReader.__new__(GoogleSheetReader)
+    reader.drive = FakeDrive([{"files": [{"id": "sheet-1", "name": "Daily_Operations_2026-06-24"}]}])
+
+    assert reader.spreadsheet_ids_in_folder("folder-1") == [("sheet-1", "Daily_Operations_2026-06-24")]
+    call = reader.drive.fake_files.calls[0]
+    assert call["supportsAllDrives"] is True
+    assert call["includeItemsFromAllDrives"] is True
+    assert call["corpora"] == "allDrives"

@@ -217,7 +217,14 @@ class GoogleSheetReader:
             clauses.append(f"'{parent_id}' in parents")
         if mime_type:
             clauses.append(f"mimeType = '{mime_type}'")
-        result = self.drive.files().list(q=" and ".join(clauses), fields="files(id, name)", pageSize=10).execute()
+        result = self.drive.files().list(
+            q=" and ".join(clauses),
+            fields="files(id, name)",
+            pageSize=10,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            corpora="allDrives",
+        ).execute()
         files = result.get("files", [])
         if not files:
             raise FileNotFoundError(f"Could not find Drive item: {name}")
@@ -225,15 +232,32 @@ class GoogleSheetReader:
 
     def folder_id_for_path(self, drive_path: str) -> str:
         parent_id: str | None = None
-        for part in [p for p in drive_path.strip("/").split("/") if p]:
-            parent_id = self._find_child(parent_id, part, "application/vnd.google-apps.folder")
+        path_parts = [p for p in drive_path.strip("/").split("/") if p]
+        resolved_parts: list[str] = []
+        for part in path_parts:
+            resolved_parts.append(part)
+            try:
+                parent_id = self._find_child(parent_id, part, "application/vnd.google-apps.folder")
+            except FileNotFoundError as exc:
+                resolved_path = "/".join(resolved_parts)
+                raise FileNotFoundError(
+                    f"Could not find Drive folder path: {resolved_path}. "
+                    "Verify the folder name and that it is shared with the service account."
+                ) from exc
         if parent_id is None:
             raise ValueError("Drive path must include at least one folder name")
         return parent_id
 
     def spreadsheet_ids_in_folder(self, folder_id: str) -> list[tuple[str, str]]:
         q = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
-        result = self.drive.files().list(q=q, fields="files(id, name)", pageSize=1000).execute()
+        result = self.drive.files().list(
+            q=q,
+            fields="files(id, name)",
+            pageSize=1000,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            corpora="allDrives",
+        ).execute()
         return sorted((f["id"], f["name"]) for f in result.get("files", []))
 
     def read_sales_values(self, spreadsheet_id: str) -> list[list[Any]]:
