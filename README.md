@@ -1,12 +1,12 @@
 # GST Invoice Generator
 
-Generate GST-compliant bank-sale receipts from Google Sheets stored in Google Drive folders like:
+Generate GST-compliant bank-sale receipts from Google Sheets stored under a nested Google Drive base path like `Google_Business_Data/Daily_Operation`, with month folders like:
 
 ```text
-drive_path/YYYY/mm_month-name/Daily_Operations_YYYY-mm-dd
+drive_path/mm-Month/Daily_Operations_YYYY-mm-dd
 ```
 
-The tool reads each spreadsheet's `SALES_ENTRY` tab (`A:N`), detects bank transactions marked as `IOB` or `IOB-amount` in `Remarks` or the unnamed column immediately after `Remarks`, and writes:
+The tool walks month folders such as `04-April` directly under the configured Drive path, then reads each spreadsheet's `SALES_ENTRY` tab (`A:N`), detects bank transactions marked as `IOB` or `IOB-amount` in `Remarks` or the unnamed column immediately after `Remarks`, and writes:
 
 - one HTML sale receipt per bank transaction;
 - `bank_transactions_summary.xlsx` with totals; and
@@ -31,7 +31,7 @@ Create a Google Cloud service account with Drive and Sheets read access, downloa
 ```bash
 python -m gst_invoice_generator \
   --credentials-file /secure/service-account.json \
-  --drive-path "Finance" \
+  --drive-path "Google_Business_Data/Daily_Operation" \
   --year 2026 \
   --start-month 4 \
   --end-month 6 \
