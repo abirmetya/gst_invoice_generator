@@ -182,12 +182,12 @@ def row_to_bank_sale(row: dict[str, Any], source_sheet: str, company_selling_add
 
 
 def month_folder_name(month: int) -> str:
-    return f"{month:02d}-{MONTH_NAMES[month - 1]}"
+    return f"{month:02d}_{MONTH_NAMES[month - 1]}"
 
 
 def build_folder_paths(root_drive_path: str, year: int, start_month: int, end_month: int) -> list[str]:
     root = root_drive_path.strip("/")
-    return [f"{root}/{month_folder_name(month)}" for month in range(start_month, end_month + 1)]
+    return [f"{root}/{year}/{month_folder_name(month)}" for month in range(start_month, end_month + 1)]
 
 
 def sheet_date_from_name(sheet_name: str) -> date | None:
