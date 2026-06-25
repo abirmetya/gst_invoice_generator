@@ -26,34 +26,19 @@ pip install -r requirements.txt
 
 Create a Google Cloud service account with Drive and Sheets read access, download its JSON key, and share the relevant Drive folders/spreadsheets with the service account email.
 
-## Request configuration
-
-Keep run-specific values in a JSON request configuration file instead of hard-coding them in the command. Start from `examples/request_config.example.json`:
-
-```json
-{
-  "credentials_file": "/secure/service-account.json",
-  "drive_path": "Google_Business_Data/Daily_Operation",
-  "year": 2026,
-  "start_month": 4,
-  "end_month": 6,
-  "output_dir": "./outputs/apr-jun-2026",
-  "seller_name": "Your Business Name",
-  "seller_gstin": "YOURGSTIN",
-  "selling_address": "Your shop / selling address"
-}
-```
-
 ## Run
 
 ```bash
-python -m gst_invoice_generator --config-file ./request_config.json
-```
-
-Any config value can still be overridden for one run, for example:
-
-```bash
-python -m gst_invoice_generator --config-file ./request_config.json --start-month 5 --end-month 5
+python -m gst_invoice_generator \
+  --credentials-file /secure/service-account.json \
+  --drive-path "Google_Business_Data/Daily_Operation" \
+  --year 2026 \
+  --start-month 4 \
+  --end-month 6 \
+  --output-dir ./outputs/apr-jun-2026 \
+  --seller-name "Your Business Name" \
+  --seller-gstin "YOURGSTIN" \
+  --selling-address "Your shop / selling address"
 ```
 
 ## IOB parsing rules

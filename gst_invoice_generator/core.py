@@ -16,10 +16,9 @@ CGST_RATE = 0.025
 SGST_RATE = 0.025
 IOB_PATTERN = re.compile(r"\bIOB(?:\s*[-:]\s*([0-9][0-9,]*(?:\.\d+)?))?\b", re.IGNORECASE)
 MONTH_NAMES = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
 ]
-SHEET_DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 SALES_COLUMNS = [
     "Entry_Date", "Phone", "Customer_Name", "Address", "Item_Type", "Qty_Ordered",
     "Unit", "Rate", "Order_Value", "Paid_Amount", "Due_Amount", "Order_Ref", "Remarks",
@@ -47,57 +46,6 @@ class BankSale:
     adjusted_rate: float
     order_ref: str
     remarks: str
-
-
-@dataclasses.dataclass(frozen=True)
-class RequestConfig:
-    credentials_file: str
-    drive_path: str
-    year: int
-    start_month: int
-    end_month: int
-    output_dir: str
-    seller_name: str = "Seller"
-    seller_gstin: str = ""
-    selling_address: str = ""
-
-    def validate(self) -> None:
-        if not self.credentials_file:
-            raise ValueError("credentials_file is required")
-        if not self.drive_path:
-            raise ValueError("drive_path is required")
-        if not self.output_dir:
-            raise ValueError("output_dir is required")
-        if not 1 <= self.start_month <= self.end_month <= 12:
-            raise ValueError("Month range must satisfy 1 <= start_month <= end_month <= 12")
-
-
-def load_request_config(config_file: str) -> RequestConfig:
-    data = json.loads(Path(config_file).read_text(encoding="utf-8"))
-    config = RequestConfig(
-        credentials_file=str(data.get("credentials_file", "")),
-        drive_path=str(data.get("drive_path", "")),
-        year=int(data.get("year", 0)),
-        start_month=int(data.get("start_month", 0)),
-        end_month=int(data.get("end_month", 0)),
-        output_dir=str(data.get("output_dir", "")),
-        seller_name=str(data.get("seller_name", "Seller")),
-        seller_gstin=str(data.get("seller_gstin", "")),
-        selling_address=str(data.get("selling_address", "")),
-    )
-    config.validate()
-    return config
-
-
-def config_with_cli_overrides(config: RequestConfig, args: argparse.Namespace) -> RequestConfig:
-    updates = {
-        field.name: getattr(args, field.name)
-        for field in dataclasses.fields(RequestConfig)
-        if hasattr(args, field.name) and getattr(args, field.name) is not None
-    }
-    merged = dataclasses.replace(config, **updates)
-    merged.validate()
-    return merged
 
 
 def parse_money(value: Any) -> float:
@@ -182,24 +130,12 @@ def row_to_bank_sale(row: dict[str, Any], source_sheet: str, company_selling_add
 
 
 def month_folder_name(month: int) -> str:
-    return f"{month:02d}-{MONTH_NAMES[month - 1]}"
+    return f"{month:02d}_{MONTH_NAMES[month - 1]}"
 
 
 def build_folder_paths(root_drive_path: str, year: int, start_month: int, end_month: int) -> list[str]:
     root = root_drive_path.strip("/")
-    return [f"{root}/{month_folder_name(month)}" for month in range(start_month, end_month + 1)]
-
-
-def sheet_date_from_name(sheet_name: str) -> date | None:
-    match = SHEET_DATE_PATTERN.search(sheet_name)
-    return parse_date(match.group(1)) if match else None
-
-
-def sheet_is_in_requested_range(sheet_name: str, year: int, start_month: int, end_month: int) -> bool:
-    sheet_date = sheet_date_from_name(sheet_name)
-    if sheet_date is None:
-        return True
-    return sheet_date.year == year and start_month <= sheet_date.month <= end_month
+    return [f"{root}/{year}/{month_folder_name(month)}" for month in range(start_month, end_month + 1)]
 
 
 class GoogleSheetReader:
@@ -234,7 +170,7 @@ class GoogleSheetReader:
     def spreadsheet_ids_in_folder(self, folder_id: str) -> list[tuple[str, str]]:
         q = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
         result = self.drive.files().list(q=q, fields="files(id, name)", pageSize=1000).execute()
-        return sorted((f["id"], f["name"]) for f in result.get("files", []))
+        return sorted((f["id"], f["name"]) for f in result.get("files", []) if f.get("name", "").startswith("Daily_Operations_"))
 
     def read_sales_values(self, spreadsheet_id: str) -> list[list[Any]]:
         result = self.sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="SALES_ENTRY!A:N").execute()
@@ -246,8 +182,6 @@ def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, st
     for folder_path in build_folder_paths(drive_path, year, start_month, end_month):
         folder_id = reader.folder_id_for_path(folder_path)
         for spreadsheet_id, sheet_name in reader.spreadsheet_ids_in_folder(folder_id):
-            if not sheet_is_in_requested_range(sheet_name, year, start_month, end_month):
-                continue
             rows = normalize_rows(reader.read_sales_values(spreadsheet_id))
             sales.extend(s for row in rows if (s := row_to_bank_sale(row, sheet_name, selling_address)))
     return sales
@@ -303,22 +237,22 @@ def write_outputs(sales: Iterable[BankSale], output_dir: str, seller_name: str, 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate GST bank sale receipts from Google Sheets SALES_ENTRY tabs.")
-    parser.add_argument("--config-file", required=True, help="Path to a JSON request configuration file.")
-    parser.add_argument("--credentials-file", help="Override credentials_file from config.")
-    parser.add_argument("--drive-path", help="Override drive_path from config.")
-    parser.add_argument("--year", type=int, help="Override year from config.")
-    parser.add_argument("--start-month", type=int, help="Override start_month from config.")
-    parser.add_argument("--end-month", type=int, help="Override end_month from config.")
-    parser.add_argument("--output-dir", help="Override output_dir from config.")
-    parser.add_argument("--seller-name", help="Override seller_name from config.")
-    parser.add_argument("--seller-gstin", help="Override seller_gstin from config.")
-    parser.add_argument("--selling-address", help="Override selling_address from config.")
+    parser.add_argument("--credentials-file", required=True)
+    parser.add_argument("--drive-path", required=True)
+    parser.add_argument("--year", type=int, required=True)
+    parser.add_argument("--start-month", type=int, required=True)
+    parser.add_argument("--end-month", type=int, required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--seller-name", default="Seller")
+    parser.add_argument("--seller-gstin", default="")
+    parser.add_argument("--selling-address", default="")
     args = parser.parse_args(argv)
-    config = config_with_cli_overrides(load_request_config(args.config_file), args)
-    reader = GoogleSheetReader(config.credentials_file)
-    sales = collect_bank_sales(reader, config.drive_path, config.year, config.start_month, config.end_month, config.selling_address)
-    write_outputs(sales, config.output_dir, config.seller_name, config.seller_gstin)
-    print(json.dumps({"bank_transactions": len(sales), "output_dir": config.output_dir}, indent=2))
+    if not 1 <= args.start_month <= args.end_month <= 12:
+        raise ValueError("Month range must satisfy 1 <= start_month <= end_month <= 12")
+    reader = GoogleSheetReader(args.credentials_file)
+    sales = collect_bank_sales(reader, args.drive_path, args.year, args.start_month, args.end_month, args.selling_address)
+    write_outputs(sales, args.output_dir, args.seller_name, args.seller_gstin)
+    print(json.dumps({"bank_transactions": len(sales), "output_dir": args.output_dir}, indent=2))
     return 0
 
 
