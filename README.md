@@ -24,7 +24,7 @@ For every detected bank transaction, the generator writes:
 - `receipts/BANK-00001.pdf`, `receipts/BANK-00002.pdf`, etc. — one professionally formatted PDF receipt per bank sale.
 - `bank_transactions_detailed.xlsx` — transaction-level details including customer, item, bank amount, taxable value, CGST, SGST, source sheet, and remarks.
 - `bank_transactions_summary.xlsx` — the actual bank transaction start/end datetimes plus totals for transaction count, bank amount, taxable value, CGST, and SGST.
-- `generation_metadata.json` — run metadata, totals, output paths, and the requested period used to detect and reuse an existing output.
+- `generation_metadata.json` — append-only run history with metadata, totals, output paths, and the requested period used to detect and reuse an existing output.
 
 All files are written inside the `output_dir` configured in your request JSON.
 
@@ -140,7 +140,7 @@ You can override any config value from the command line for a one-off run. For e
 python -m gst_invoice_generator --config-file ./request_config.json --start-month 5 --end-month 5
 ```
 
-On success, the command prints a small JSON summary such as:
+During execution, progress messages are printed to stderr so long runs show which Drive folder or spreadsheet is currently being processed. On success, the command prints a small JSON summary to stdout such as:
 
 ```json
 {
@@ -183,7 +183,8 @@ python -m compileall gst_invoice_generator
 ## Notes and limitations
 
 - Receipts are generated directly as PDF files with ReportLab.
-- If `generation_metadata.json` already matches the requested Drive path, year, and month range, the CLI reuses the existing output instead of reading Google Drive and regenerating files.
+- If `generation_metadata.json` already contains a successful run matching the requested Drive path, year, and month range, the CLI appends a new reuse event and reuses the existing output instead of reading Google Drive and regenerating files.
 - Spreadsheet names that include a `YYYY-MM-DD` date are filtered by the configured year/month range.
 - Spreadsheet names without a parseable date are processed if they are inside a selected month folder.
 - The tool currently reads `SALES_ENTRY!A:N`; add columns after `N` only if the code is updated to read them.
+- Google API reads use retries and a longer socket timeout to reduce transient `TimeoutError` failures on large or slow runs.

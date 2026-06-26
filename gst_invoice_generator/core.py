@@ -6,6 +6,8 @@ import importlib
 import json
 import math
 import re
+import socket
+import sys
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, Iterable
@@ -13,6 +15,8 @@ from xml.sax.saxutils import escape
 
 GST_RATE = 0.05
 METADATA_FILE = "generation_metadata.json"
+GOOGLE_API_RETRIES = 5
+GOOGLE_API_TIMEOUT_SECONDS = 120
 CGST_RATE = 0.025
 SGST_RATE = 0.025
 IOB_PATTERN = re.compile(r"\bIOB(?:\s*[-:]\s*([0-9][0-9,]*(?:\.\d+)?))?\b", re.IGNORECASE)
@@ -26,6 +30,17 @@ SALES_COLUMNS = [
     "Unit", "Rate", "Order_Value", "Paid_Amount", "Due_Amount", "Order_Ref", "Remarks",
     "Unnamed_Remarks",
 ]
+
+
+def progress(message: str) -> None:
+    print(f"[gst-invoice-generator] {message}", file=sys.stderr, flush=True)
+
+
+def _execute_google_request(request: Any) -> dict[str, Any]:
+    try:
+        return request.execute(num_retries=GOOGLE_API_RETRIES)
+    except TypeError:
+        return request.execute()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -205,6 +220,7 @@ def sheet_is_in_requested_range(sheet_name: str, year: int, start_month: int, en
 
 class GoogleSheetReader:
     def __init__(self, credentials_file: str):
+        socket.setdefaulttimeout(GOOGLE_API_TIMEOUT_SECONDS)
         service_account = importlib.import_module("google.oauth2.service_account")
         discovery = importlib.import_module("googleapiclient.discovery")
         scopes = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -225,7 +241,8 @@ class GoogleSheetReader:
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
             corpora="allDrives",
-        ).execute()
+        )
+        result = _execute_google_request(result)
         files = result.get("files", [])
         if not files:
             raise FileNotFoundError(f"Could not find Drive item: {name}")
@@ -251,30 +268,39 @@ class GoogleSheetReader:
 
     def spreadsheet_ids_in_folder(self, folder_id: str) -> list[tuple[str, str]]:
         q = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
-        result = self.drive.files().list(
+        request = self.drive.files().list(
             q=q,
             fields="files(id, name)",
             pageSize=1000,
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
             corpora="allDrives",
-        ).execute()
+        )
+        result = _execute_google_request(request)
         return sorted((f["id"], f["name"]) for f in result.get("files", []))
 
     def read_sales_values(self, spreadsheet_id: str) -> list[list[Any]]:
-        result = self.sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="SALES_ENTRY!A:N").execute()
+        request = self.sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="SALES_ENTRY!A:N")
+        result = _execute_google_request(request)
         return result.get("values", [])
 
 
 def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, start_month: int, end_month: int, selling_address: str) -> list[BankSale]:
     sales: list[BankSale] = []
     for folder_path in build_folder_paths(drive_path, year, start_month, end_month):
+        progress(f"Opening Drive folder: {folder_path}")
         folder_id = reader.folder_id_for_path(folder_path)
-        for spreadsheet_id, sheet_name in reader.spreadsheet_ids_in_folder(folder_id):
+        spreadsheets = reader.spreadsheet_ids_in_folder(folder_id)
+        progress(f"Found {len(spreadsheets)} spreadsheet(s) in {folder_path}")
+        for spreadsheet_id, sheet_name in spreadsheets:
             if not sheet_is_in_requested_range(sheet_name, year, start_month, end_month):
+                progress(f"Skipping outside requested range: {sheet_name}")
                 continue
+            progress(f"Reading SALES_ENTRY from: {sheet_name}")
             rows = normalize_rows(reader.read_sales_values(spreadsheet_id))
-            sales.extend(s for row in rows if (s := row_to_bank_sale(row, sheet_name, selling_address)))
+            sheet_sales = [s for row in rows if (s := row_to_bank_sale(row, sheet_name, selling_address))]
+            sales.extend(sheet_sales)
+            progress(f"Collected {len(sheet_sales)} bank transaction(s) from {sheet_name}; running total: {len(sales)}")
     return sales
 
 
@@ -405,17 +431,41 @@ def _request_metadata(config: RequestConfig) -> dict[str, Any]:
     }
 
 
-def existing_output_metadata(config: RequestConfig) -> dict[str, Any] | None:
-    metadata_path = Path(config.output_dir) / METADATA_FILE
+def _metadata_path(config: RequestConfig) -> Path:
+    return Path(config.output_dir) / METADATA_FILE
+
+
+def _metadata_log(config: RequestConfig) -> dict[str, Any]:
+    metadata_path = _metadata_path(config)
     if not metadata_path.exists():
-        return None
+        return {"runs": []}
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if metadata.get("request") != _request_metadata(config):
-        return None
-    output_paths = metadata.get("output_paths", {})
-    required = [output_paths.get("summary_excel"), output_paths.get("detail_excel"), output_paths.get("receipts_dir")]
-    if all(path and Path(path).exists() for path in required):
+    if isinstance(metadata, dict) and isinstance(metadata.get("runs"), list):
         return metadata
+    if isinstance(metadata, dict) and "request" in metadata:
+        return {"runs": [metadata]}
+    return {"runs": []}
+
+
+def _append_metadata_run(config: RequestConfig, run_metadata: dict[str, Any]) -> dict[str, Any]:
+    metadata_path = _metadata_path(config)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    log = _metadata_log(config)
+    log["runs"].append(run_metadata)
+    metadata_path.write_text(json.dumps(log, indent=2), encoding="utf-8")
+    return run_metadata
+
+
+def existing_output_metadata(config: RequestConfig) -> dict[str, Any] | None:
+    for metadata in reversed(_metadata_log(config)["runs"]):
+        if metadata.get("status") not in {None, "created"}:
+            continue
+        if metadata.get("request") != _request_metadata(config):
+            continue
+        output_paths = metadata.get("output_paths", {})
+        required = [output_paths.get("summary_excel"), output_paths.get("detail_excel"), output_paths.get("receipts_dir")]
+        if all(path and Path(path).exists() for path in required):
+            return metadata
     return None
 
 
@@ -427,21 +477,27 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig) -> dict[str,
     receipts_dir = out / "receipts"
     receipts_dir.mkdir(parents=True, exist_ok=True)
     rows = [dataclasses.asdict(s) for s in sales]
+    progress(f"Writing {len(rows)} receipt PDF(s) to {receipts_dir}")
     for idx, row in enumerate(rows, start=1):
         sale = BankSale(**row)
         receipt_no = f"BANK-{idx:05d}"
         row["receipt_no"] = receipt_no
         _receipt_pdf(receipts_dir / f"{receipt_no}.pdf", sale, receipt_no, seller_name, seller_gstin)
+        if idx == 1 or idx == len(rows) or idx % 10 == 0:
+            progress(f"Wrote {idx}/{len(rows)} receipt PDF(s)")
     headers = ["receipt_no", *[f.name for f in dataclasses.fields(BankSale)]]
     detail_rows = [[row.get(header, "") for header in headers] for row in rows]
     detail_excel = out / "bank_transactions_detailed.xlsx"
     summary_excel = out / "bank_transactions_summary.xlsx"
+    progress(f"Writing detailed Excel report: {detail_excel}")
     _write_xlsx(detail_excel, headers, detail_rows)
     start_datetime, end_datetime = _actual_transaction_window(rows)
     totals = _totals(rows)
     summary_rows = [["start_datetime", start_datetime], ["end_datetime", end_datetime], *[[key, value] for key, value in totals.items()]]
+    progress(f"Writing summary Excel report: {summary_excel}")
     _write_xlsx(summary_excel, ["metric", "value"], summary_rows)
     metadata = {
+        "status": "created",
         "request": _request_metadata(config),
         "start_datetime": start_datetime,
         "end_datetime": end_datetime,
@@ -455,8 +511,8 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig) -> dict[str,
             "metadata": str(out / METADATA_FILE),
         },
     }
-    (out / METADATA_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    return metadata
+    progress(f"Appending run metadata: {out / METADATA_FILE}")
+    return _append_metadata_run(config, metadata)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -473,7 +529,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--selling-address", help="Override selling_address from config.")
     args = parser.parse_args(argv)
     config = config_with_cli_overrides(load_request_config(args.config_file), args)
+    progress(f"Starting bank receipt generation for {config.year}-{config.start_month:02d} through {config.year}-{config.end_month:02d}")
     if metadata := existing_output_metadata(config):
+        progress("Existing output found for this period; skipping Google Drive reads and reusing previous files")
+        reuse_metadata = {
+            "status": "existing_output",
+            "request": _request_metadata(config),
+            "created_on": datetime.now(UTC).isoformat(),
+            "reused_run_created_on": metadata.get("created_on", ""),
+            "start_datetime": metadata.get("start_datetime", ""),
+            "end_datetime": metadata.get("end_datetime", ""),
+            "totals": metadata.get("totals", {}),
+            "output_paths": metadata.get("output_paths", {}),
+        }
+        _append_metadata_run(config, reuse_metadata)
         print(json.dumps({
             "status": "existing_output",
             "message": "Output already exists for this period. Reusing the previous run.",
@@ -482,8 +551,10 @@ def main(argv: list[str] | None = None) -> int:
             "metadata": metadata.get("output_paths", {}).get("metadata", str(Path(config.output_dir) / METADATA_FILE)),
         }, indent=2))
         return 0
+    progress("No existing output found; reading from Google Drive")
     reader = GoogleSheetReader(config.credentials_file)
     sales = collect_bank_sales(reader, config.drive_path, config.year, config.start_month, config.end_month, config.selling_address)
+    progress(f"Finished reading Google Sheets; collected {len(sales)} bank transaction(s)")
     metadata = write_outputs(sales, config)
     print(json.dumps({
         "status": "created",

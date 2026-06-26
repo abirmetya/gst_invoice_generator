@@ -6,6 +6,7 @@ import pytest
 from gst_invoice_generator.core import (
     GoogleSheetReader,
     RequestConfig,
+    _append_metadata_run,
     build_folder_paths,
     config_with_cli_overrides,
     existing_output_metadata,
@@ -228,3 +229,20 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
     assert metadata["end_datetime"] == "2026-06-24T23:59:59"
     assert metadata["totals"]["transaction_count"] == 1
     assert existing_output_metadata(config)["output_paths"]["output_dir"] == str(tmp_path)
+    log = json.loads((tmp_path / "generation_metadata.json").read_text(encoding="utf-8"))
+    assert len(log["runs"]) == 1
+
+    reused = {
+        "status": "existing_output",
+        "request": {
+            "drive_path": config.drive_path,
+            "year": config.year,
+            "start_month": config.start_month,
+            "end_month": config.end_month,
+        },
+        "created_on": "2026-06-26T00:00:00+00:00",
+        "output_paths": metadata["output_paths"],
+    }
+    _append_metadata_run(config, reused)
+    log = json.loads((tmp_path / "generation_metadata.json").read_text(encoding="utf-8"))
+    assert [run["status"] for run in log["runs"]] == ["created", "existing_output"]
