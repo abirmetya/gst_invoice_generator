@@ -412,6 +412,37 @@ def _write_xlsx(path: Path, headers: list[str], data_rows: list[list[Any]]) -> N
     workbook.save(path)
 
 
+def _append_xlsx(path: Path, headers: list[str], data_rows: list[list[Any]]) -> None:
+    openpyxl = importlib.import_module("openpyxl")
+    if path.is_file():
+        workbook = openpyxl.load_workbook(path)
+        sheet = workbook.active
+        if sheet.max_row == 0:
+            sheet.append(headers)
+    else:
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.append(headers)
+    for row in data_rows:
+        sheet.append(row)
+    for column_cells in sheet.columns:
+        max_length = max(len(str(cell.value or "")) for cell in column_cells)
+        sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 48)
+    workbook.save(path)
+
+
+def _receipt_number_value(receipt_no: Any) -> int:
+    match = re.search(r"(\d+)$", str(receipt_no or ""))
+    return int(match.group(1)) if match else 0
+
+
+def _next_receipt_index(detail_excel: Path) -> int:
+    existing_rows = _read_detail_rows(detail_excel)
+    if not existing_rows:
+        return 1
+    return max(_receipt_number_value(row.get("receipt_no")) for row in existing_rows) + 1
+
+
 def _actual_transaction_window(rows: list[dict[str, Any]]) -> tuple[str, str]:
     entry_dates = sorted(row["entry_date"] for row in rows if row.get("entry_date"))
     if not entry_dates:
@@ -524,7 +555,8 @@ def _metadata_for_requested_months(config: RequestConfig, source_metadata: dict[
 
 
 def existing_output_for_requested_months(config: RequestConfig) -> dict[str, Any] | None:
-    for metadata in reversed(_created_metadata_for_drive_year(config)):
+    created_runs = _created_metadata_for_drive_year(config)
+    for metadata in reversed(created_runs):
         request = metadata.get("request", {})
         try:
             start_month = int(request.get("start_month", 0))
@@ -533,6 +565,8 @@ def existing_output_for_requested_months(config: RequestConfig) -> dict[str, Any
             continue
         if start_month <= config.start_month <= config.end_month <= end_month:
             return _metadata_for_requested_months(config, metadata)
+    if created_runs and not missing_months_in_metadata(config):
+        return _metadata_for_requested_months(config, created_runs[-1])
     return None
 
 
@@ -638,26 +672,28 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
     receipts_root = out
     rows = [dataclasses.asdict(s) for s in sales]
     notify(f"Writing {len(rows)} receipt PDF(s) under monthly folders in {receipts_root}")
-    for idx, row in enumerate(rows, start=1):
+    detail_excel = out / "bank_transactions_detailed.xlsx"
+    summary_excel = out / "bank_transactions_summary.xlsx"
+    next_receipt_index = _next_receipt_index(detail_excel)
+    for sequence, row in enumerate(rows, start=1):
+        receipt_index = next_receipt_index + sequence - 1
         sale = BankSale(**row)
-        receipt_no = f"BANK-{idx:05d}"
+        receipt_no = f"BANK-{receipt_index:05d}"
         row["receipt_no"] = receipt_no
         receipts_dir = receipts_root / _receipt_month(sale, config) / "receipts"
         receipts_dir.mkdir(parents=True, exist_ok=True)
         _receipt_pdf(receipts_dir / f"{receipt_no}.pdf", sale, receipt_no, seller_name, seller_gstin)
-        if idx == 1 or idx == len(rows) or idx % 10 == 0:
-            notify(f"Wrote {idx}/{len(rows)} receipt PDF(s)")
+        if sequence == 1 or sequence == len(rows) or sequence % 10 == 0:
+            notify(f"Wrote {sequence}/{len(rows)} receipt PDF(s)")
     headers = ["receipt_no", *[f.name for f in dataclasses.fields(BankSale)]]
     detail_rows = [[row.get(header, "") for header in headers] for row in rows]
-    detail_excel = out / "bank_transactions_detailed.xlsx"
-    summary_excel = out / "bank_transactions_summary.xlsx"
-    notify(f"Writing detailed Excel report: {detail_excel}")
-    _write_xlsx(detail_excel, headers, detail_rows)
+    notify(f"Appending detailed Excel report: {detail_excel}")
+    _append_xlsx(detail_excel, headers, detail_rows)
     start_datetime, end_datetime = _actual_transaction_window(rows)
     totals = _totals(rows)
     summary_rows = _summary_table_rows(rows)
-    notify(f"Writing summary Excel report: {summary_excel}")
-    _write_xlsx(summary_excel, ["period", "start_datetime", "end_datetime", "transaction_count", "bank_amount", "taxable_value", "cgst", "sgst"], summary_rows)
+    notify(f"Appending summary Excel report: {summary_excel}")
+    _append_xlsx(summary_excel, ["period", "start_datetime", "end_datetime", "transaction_count", "bank_amount", "taxable_value", "cgst", "sgst"], summary_rows)
     metadata = {
         "status": "created",
         "request": _request_metadata(config),

@@ -1,4 +1,5 @@
 import argparse
+import dataclasses
 import json
 
 import pytest
@@ -397,3 +398,47 @@ def test_existing_output_for_requested_months_filters_subset_and_does_not_append
     assert metadata["totals"]["bank_amount"] == 3150.0
     assert [summary["month"] for summary in metadata["month_summaries"]] == [4, 5]
     assert [run["status"] for run in log_after["runs"]] == ["created"]
+
+
+def test_write_outputs_appends_detail_and_summary_workbooks(tmp_path):
+    pytest.importorskip("reportlab")
+    openpyxl = pytest.importorskip("openpyxl")
+    base = {
+        "Phone": "9999999999",
+        "Customer_Name": "Acme",
+        "Address": "Billing Addr",
+        "Item_Type": "Milk",
+        "Qty_Ordered": "10",
+        "Unit": "L",
+        "Rate": "105",
+        "Order_Value": "1050",
+        "Order_Ref": "ORD-1",
+        "Remarks": "IOB",
+        "Unnamed_Remarks": "",
+    }
+    first_sale = row_to_bank_sale({**base, "Entry_Date": "2026-06-24"}, "Daily_Operations_2026-06-24", "Shop Addr")
+    second_sale = row_to_bank_sale({**base, "Entry_Date": "2026-07-01", "Order_Value": "2100", "Remarks": "IOB-2100"}, "Daily_Operations_2026-07-01", "Shop Addr")
+    config = RequestConfig(
+        credentials_file="creds.json",
+        drive_path="Google_Business_Data/Daily_Operation",
+        year=2026,
+        start_month=6,
+        end_month=6,
+        output_dir=str(tmp_path),
+        seller_name="Shop",
+        seller_gstin="GSTIN",
+        selling_address="Shop Addr",
+    )
+
+    write_outputs([first_sale], config)
+    write_outputs([second_sale], dataclasses.replace(config, start_month=7, end_month=7))
+
+    detail_workbook = openpyxl.load_workbook(tmp_path / "bank_transactions_detailed.xlsx", read_only=True, data_only=True)
+    detail_rows = list(detail_workbook.active.iter_rows(values_only=True))
+    detail_workbook.close()
+    summary_workbook = openpyxl.load_workbook(tmp_path / "bank_transactions_summary.xlsx", read_only=True, data_only=True)
+    summary_rows = list(summary_workbook.active.iter_rows(values_only=True))
+    summary_workbook.close()
+
+    assert [row[0] for row in detail_rows[1:]] == ["BANK-00001", "BANK-00002"]
+    assert [row[0] for row in summary_rows] == ["period", "TOTAL", "06-June", "TOTAL", "07-July"]
