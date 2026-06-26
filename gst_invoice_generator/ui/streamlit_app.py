@@ -115,10 +115,6 @@ def _close_downloads() -> None:
     st.session_state.show_downloads = False
 
 
-def _close_downloads() -> None:
-    st.session_state.show_downloads = False
-
-
 def _render_downloads(metadata: dict[str, Any]) -> None:
     paths = metadata.get("output_paths", {})
     header_cols = st.columns([4, 1])
