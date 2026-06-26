@@ -88,6 +88,12 @@ class RequestConfig:
             raise ValueError("Month range must satisfy 1 <= start_month <= end_month <= 12")
 
 
+def _first_config_value(value: Any, default: str = "") -> str:
+    if isinstance(value, list):
+        return str(value[0]) if value else default
+    return str(value if value is not None else default)
+
+
 def load_request_config(config_file: str) -> RequestConfig:
     data = json.loads(Path(config_file).read_text(encoding="utf-8"))
     config = RequestConfig(
@@ -97,9 +103,9 @@ def load_request_config(config_file: str) -> RequestConfig:
         start_month=int(data.get("start_month", 0)),
         end_month=int(data.get("end_month", 0)),
         output_dir=str(data.get("output_dir", "")),
-        seller_name=str(data.get("seller_name", "Seller")),
-        seller_gstin=str(data.get("seller_gstin", "")),
-        selling_address=str(data.get("selling_address", "")),
+        seller_name=_first_config_value(data.get("seller_name"), "Seller"),
+        seller_gstin=_first_config_value(data.get("seller_gstin")),
+        selling_address=_first_config_value(data.get("selling_address")),
     )
     config.validate()
     return config
@@ -470,20 +476,27 @@ def existing_output_metadata(config: RequestConfig) -> dict[str, Any] | None:
     return None
 
 
+def _receipt_month(sale: BankSale, config: RequestConfig) -> str:
+    month = sale.entry_date.month if sale.entry_date else config.start_month
+    return f"{month:02d}"
+
+
 def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_callback: Any | None = None) -> dict[str, Any]:
     notify = progress_callback or progress
     seller_name = config.seller_name
     seller_gstin = config.seller_gstin
     output_dir = config.output_dir
     out = Path(output_dir)
-    receipts_dir = out / "receipts"
-    receipts_dir.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
+    receipts_root = out
     rows = [dataclasses.asdict(s) for s in sales]
-    notify(f"Writing {len(rows)} receipt PDF(s) to {receipts_dir}")
+    notify(f"Writing {len(rows)} receipt PDF(s) under monthly folders in {receipts_root}")
     for idx, row in enumerate(rows, start=1):
         sale = BankSale(**row)
         receipt_no = f"BANK-{idx:05d}"
         row["receipt_no"] = receipt_no
+        receipts_dir = receipts_root / _receipt_month(sale, config) / "receipts"
+        receipts_dir.mkdir(parents=True, exist_ok=True)
         _receipt_pdf(receipts_dir / f"{receipt_no}.pdf", sale, receipt_no, seller_name, seller_gstin)
         if idx == 1 or idx == len(rows) or idx % 10 == 0:
             notify(f"Wrote {idx}/{len(rows)} receipt PDF(s)")
@@ -507,7 +520,8 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
         "totals": totals,
         "output_paths": {
             "output_dir": str(out),
-            "receipts_dir": str(receipts_dir),
+            "receipts_dir": str(receipts_root),
+            "receipt_dirs": sorted(str(path) for path in receipts_root.glob("*/receipts") if path.is_dir()),
             "detail_excel": str(detail_excel),
             "summary_excel": str(summary_excel),
             "metadata": str(out / METADATA_FILE),

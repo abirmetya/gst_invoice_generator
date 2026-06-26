@@ -5,7 +5,16 @@
   "start_month": 4,
   "end_month": 6,
   "output_dir": "./outputs/apr-jun-2026",
-  "seller_name": "Your Business Name",
-  "seller_gstin": "YOURGSTIN",
-  "selling_address": "Your shop / selling address"
+  "seller_name": [
+    "Your Business Name",
+    "Second Business Name"
+  ],
+  "seller_gstin": [
+    "YOURGSTIN",
+    "SECONDGSTIN"
+  ],
+  "selling_address": [
+    "Your shop / selling address",
+    "Second shop / selling address"
+  ]
 }
