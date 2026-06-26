@@ -1,43 +1,54 @@
 from __future__ import annotations
 
+import calendar
 import io
 import json
 import zipfile
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
 from gst_invoice_generator.core import RequestConfig, load_request_config
-from gst_invoice_generator.service import processed_ranges, run_generation
+from gst_invoice_generator.service import processed_receipt_days, run_generation
 
 st.set_page_config(page_title="GST Invoice Studio", page_icon="🧾", layout="wide")
 
 
-def _month_label(month: int | None) -> str:
-    if not month:
-        return "?"
-    return f"{month:02d}"
-
-
 def _file_download(path: str | Path, label: str, mime: str) -> None:
+    if not path:
+        return
     file_path = Path(path)
-    if file_path.exists():
-        st.download_button(label, file_path.read_bytes(), file_name=file_path.name, mime=mime, use_container_width=True)
+    if file_path.is_file():
+        st.download_button(label, file_path.read_bytes(), file_name=file_path.name, mime=mime, use_container_width=True, on_click="ignore")
+
+
+def _zip_files(paths: list[str | Path], root: str | Path | None = None) -> bytes | None:
+    files = [Path(path) for path in paths if path and Path(path).is_file()]
+    if not files:
+        return None
+    root_path = Path(root) if root else None
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file_path in files:
+            archive_name = file_path.name
+            if root_path is not None:
+                try:
+                    archive_name = str(file_path.relative_to(root_path))
+                except ValueError:
+                    archive_name = file_path.name
+            archive.write(file_path, archive_name)
+    return buffer.getvalue()
 
 
 def _zip_receipts(receipts_dir: str | Path) -> bytes | None:
+    if not receipts_dir:
+        return None
     directory = Path(receipts_dir)
-    if not directory.exists():
+    if not directory.is_dir():
         return None
-    receipts = sorted(directory.rglob("*.pdf"))
-    if not receipts:
-        return None
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for receipt in receipts:
-            archive.write(receipt, receipt.relative_to(directory))
-    return buffer.getvalue()
+    return _zip_files(sorted(directory.rglob("*.pdf")), root=directory)
 
 
 def _configured_options(raw_config: dict[str, Any], key: str, fallback: str) -> list[str]:
@@ -55,30 +66,62 @@ def _load_sidebar_config(config_file: str) -> tuple[RequestConfig, dict[str, Any
     return load_request_config(str(config_path)), raw_config
 
 
-def _render_processed_ranges(output_dir: str) -> None:
-    ranges = processed_ranges(output_dir)
-    st.subheader("Already processed ranges")
-    if not ranges:
-        st.info("No completed run metadata found for this output folder yet.")
+def _render_receipt_calendar(output_dir: str, default_year: int, default_month: int) -> None:
+    days = processed_receipt_days(output_dir)
+    st.subheader("Receipt calendar")
+    if not days:
+        st.info("No dated receipt PDFs found in completed run metadata for this output folder yet.")
         return
-    columns = st.columns(min(3, len(ranges)))
-    for index, item in enumerate(reversed(ranges[-6:])):
-        with columns[index % len(columns)]:
-            st.markdown(
-                f"""
-                <div class="range-card">
-                    <div class="range-title">{item.get('year', '?')} · {_month_label(item.get('start_month'))} → {_month_label(item.get('end_month'))}</div>
-                    <div>{item.get('transaction_count', 0)} bank transactions</div>
-                    <div>₹{float(item.get('bank_amount') or 0):,.2f}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+
+    available_dates = sorted(date.fromisoformat(day) for day in days)
+    available_years = sorted({item.year for item in available_dates})
+    year_index = available_years.index(default_year) if default_year in available_years else len(available_years) - 1
+    year_value = st.selectbox("Calendar year", available_years, index=year_index)
+    available_months = sorted({item.month for item in available_dates if item.year == year_value})
+    month_index = available_months.index(default_month) if default_month in available_months else 0
+    month_value = st.selectbox("Calendar month", available_months, index=month_index, format_func=lambda month: f"{month:02d} - {calendar.month_name[month]}")
+
+    st.caption("Days with receipts show a download button. Empty days are intentionally disabled.")
+    header_cols = st.columns(7)
+    for col, name in zip(header_cols, ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], strict=True):
+        col.markdown(f"**{name}**")
+
+    for week_index, week in enumerate(calendar.Calendar(firstweekday=0).monthdayscalendar(year_value, month_value)):
+        cols = st.columns(7)
+        for col_index, day_number in enumerate(week):
+            with cols[col_index]:
+                if day_number == 0:
+                    st.write("")
+                    continue
+                key = f"{year_value:04d}-{month_value:02d}-{day_number:02d}"
+                day = days.get(key)
+                if not day:
+                    st.button(str(day_number), key=f"empty_day_{key}_{week_index}", disabled=True, use_container_width=True)
+                    continue
+                label = f"{day_number}\n{day['transaction_count']} receipt(s)"
+                if receipt_zip := _zip_files(day["receipt_paths"]):
+                    st.download_button(
+                        label,
+                        receipt_zip,
+                        file_name=f"receipts-{key}.zip",
+                        mime="application/zip",
+                        key=f"receipt_day_{key}",
+                        use_container_width=True,
+                        on_click="ignore",
+                    )
+
+
+def _close_downloads() -> None:
+    st.session_state.show_downloads = False
 
 
 def _render_downloads(metadata: dict[str, Any]) -> None:
     paths = metadata.get("output_paths", {})
-    st.subheader("Download outputs")
+    header_cols = st.columns([4, 1])
+    with header_cols[0]:
+        st.subheader("Download outputs")
+    with header_cols[1]:
+        st.button("Close", key="close_downloads", use_container_width=True, on_click=_close_downloads)
     cols = st.columns(4)
     with cols[0]:
         _file_download(paths.get("detail_excel", ""), "Detailed Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -88,7 +131,7 @@ def _render_downloads(metadata: dict[str, Any]) -> None:
         _file_download(paths.get("metadata", ""), "Metadata JSON", "application/json")
     with cols[3]:
         if receipt_zip := _zip_receipts(paths.get("receipts_dir", "")):
-            st.download_button("Receipts ZIP", receipt_zip, file_name="receipts.zip", mime="application/zip", use_container_width=True)
+            st.download_button("Receipts ZIP", receipt_zip, file_name="receipts.zip", mime="application/zip", use_container_width=True, on_click="ignore")
 
 
 st.markdown(
@@ -96,8 +139,6 @@ st.markdown(
     <style>
     .stApp { background: linear-gradient(135deg, #f8fbff 0%, #f4fff9 100%); }
     .hero { padding: 1.25rem; border-radius: 1.25rem; background: linear-gradient(135deg, #12355b, #1f8a70); color: white; box-shadow: 0 16px 40px rgba(18, 53, 91, .18); }
-    .range-card { padding: 1rem; border-radius: 1rem; border: 1px solid #dbe8f6; background: rgba(255,255,255,.86); box-shadow: 0 8px 24px rgba(18, 53, 91, .08); }
-    .range-title { font-weight: 700; color: #12355b; margin-bottom: .35rem; }
     </style>
     <div class="hero">
       <h1>🧾 GST Invoice Studio</h1>
@@ -120,7 +161,7 @@ with st.sidebar:
     seller_gstin = st.selectbox("Seller GSTIN", _configured_options(raw_config, "seller_gstin", base_config.seller_gstin))
     selling_address = st.selectbox("Selling address", _configured_options(raw_config, "selling_address", base_config.selling_address))
 
-_render_processed_ranges(base_config.output_dir)
+_render_receipt_calendar(base_config.output_dir, base_config.year, base_config.start_month)
 
 st.divider()
 left, right = st.columns([2, 1])
@@ -138,6 +179,11 @@ with right:
     st.caption("Notifications appear here while the app works.")
 
 start = st.button("✨ Start generation", type="primary", use_container_width=True)
+
+if "show_downloads" not in st.session_state:
+    st.session_state.show_downloads = False
+if "latest_metadata" not in st.session_state:
+    st.session_state.latest_metadata = None
 
 if start:
     try:
@@ -175,6 +221,10 @@ if start:
         c1.metric("Transactions", totals.get("transaction_count", 0))
         c2.metric("Bank amount", f"₹{float(totals.get('bank_amount') or 0):,.2f}")
         c3.metric("Status", metadata.get("status", "done"))
-        _render_downloads(metadata)
+        st.session_state.latest_metadata = metadata
+        st.session_state.show_downloads = True
     except Exception as exc:
         st.error(f"Generation failed: {exc}")
+
+if st.session_state.get("show_downloads") and st.session_state.get("latest_metadata"):
+    _render_downloads(st.session_state.latest_metadata)
