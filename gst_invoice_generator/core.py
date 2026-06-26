@@ -291,10 +291,12 @@ class GoogleSheetReader:
         return result.get("values", [])
 
 
-def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, start_month: int, end_month: int, selling_address: str, progress_callback: Any | None = None) -> list[BankSale]:
+def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, start_month: int, end_month: int, selling_address: str, progress_callback: Any | None = None, months: Iterable[int] | None = None) -> list[BankSale]:
     notify = progress_callback or progress
     sales: list[BankSale] = []
-    for folder_path in build_folder_paths(drive_path, year, start_month, end_month):
+    selected_months = list(months) if months is not None else list(range(start_month, end_month + 1))
+    for month in selected_months:
+        folder_path = build_folder_paths(drive_path, year, month, month)[0]
         notify(f"Opening Drive folder: {folder_path}")
         folder_id = reader.folder_id_for_path(folder_path)
         spreadsheets = reader.spreadsheet_ids_in_folder(folder_id)
@@ -429,6 +431,111 @@ def _totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+
+def _month_key(row: dict[str, Any]) -> int | None:
+    entry_date = row.get("entry_date")
+    if isinstance(entry_date, datetime):
+        entry_date = entry_date.date()
+    if isinstance(entry_date, date):
+        return entry_date.month
+    parsed = parse_date(entry_date)
+    return parsed.month if parsed else None
+
+
+def _monthly_summaries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for month in sorted({month for row in rows if (month := _month_key(row)) is not None}):
+        month_rows = [row for row in rows if _month_key(row) == month]
+        start_datetime, end_datetime = _actual_transaction_window(month_rows)
+        summaries.append({
+            "year": month_rows[0].get("entry_date").year if isinstance(month_rows[0].get("entry_date"), date) else None,
+            "month": month,
+            "month_name": MONTH_NAMES[month - 1],
+            "start_datetime": start_datetime,
+            "end_datetime": end_datetime,
+            **_totals(month_rows),
+        })
+    return summaries
+
+
+def _summary_table_rows(rows: list[dict[str, Any]]) -> list[list[Any]]:
+    start_datetime, end_datetime = _actual_transaction_window(rows)
+    totals = _totals(rows)
+    table_rows = [["TOTAL", start_datetime, end_datetime, *[totals[key] for key in ("transaction_count", "bank_amount", "taxable_value", "cgst", "sgst")]]]
+    for summary in _monthly_summaries(rows):
+        table_rows.append([
+            f"{summary['month']:02d}-{summary['month_name']}",
+            summary["start_datetime"],
+            summary["end_datetime"],
+            summary["transaction_count"],
+            summary["bank_amount"],
+            summary["taxable_value"],
+            summary["cgst"],
+            summary["sgst"],
+        ])
+    return table_rows
+
+
+def _read_detail_rows(path: str | Path) -> list[dict[str, Any]]:
+    detail_path = Path(path)
+    if not detail_path.is_file():
+        return []
+    openpyxl = importlib.import_module("openpyxl")
+    workbook = openpyxl.load_workbook(detail_path, read_only=True, data_only=True)
+    sheet = workbook.active
+    values = sheet.iter_rows(values_only=True)
+    try:
+        headers = [str(value or "") for value in next(values)]
+    except StopIteration:
+        workbook.close()
+        return []
+    rows = [dict(zip(headers, row, strict=False)) for row in values]
+    workbook.close()
+    return rows
+
+
+def _numeric_row(row: dict[str, Any]) -> dict[str, Any]:
+    converted = dict(row)
+    converted["entry_date"] = parse_date(row.get("entry_date"))
+    for key in ("bank_amount", "taxable_value", "cgst", "sgst"):
+        converted[key] = parse_money(row.get(key))
+    return converted
+
+
+def _metadata_for_requested_months(config: RequestConfig, source_metadata: dict[str, Any]) -> dict[str, Any]:
+    requested_months = set(range(config.start_month, config.end_month + 1))
+    rows = [
+        row
+        for row in (_numeric_row(raw) for raw in _read_detail_rows(source_metadata.get("output_paths", {}).get("detail_excel", "")))
+        if row.get("entry_date") and row["entry_date"].year == config.year and row["entry_date"].month in requested_months
+    ]
+    start_datetime, end_datetime = _actual_transaction_window(rows)
+    return {
+        "status": "existing_output",
+        "request": _request_metadata(config),
+        "created_on": datetime.now(UTC).isoformat(),
+        "reused_run_created_on": source_metadata.get("created_on", ""),
+        "start_datetime": start_datetime,
+        "end_datetime": end_datetime,
+        "totals": _totals(rows),
+        "month_summaries": [summary for summary in _monthly_summaries(rows) if summary["month"] in requested_months],
+        "output_paths": source_metadata.get("output_paths", {}),
+    }
+
+
+def existing_output_for_requested_months(config: RequestConfig) -> dict[str, Any] | None:
+    for metadata in reversed(_created_metadata_for_drive_year(config)):
+        request = metadata.get("request", {})
+        try:
+            start_month = int(request.get("start_month", 0))
+            end_month = int(request.get("end_month", 0))
+        except (TypeError, ValueError):
+            continue
+        if start_month <= config.start_month <= config.end_month <= end_month:
+            return _metadata_for_requested_months(config, metadata)
+    return None
+
+
 def _request_metadata(config: RequestConfig) -> dict[str, Any]:
     return {
         "drive_path": config.drive_path,
@@ -476,6 +583,46 @@ def existing_output_metadata(config: RequestConfig) -> dict[str, Any] | None:
     return None
 
 
+
+def _created_metadata_for_drive_year(config: RequestConfig) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    for metadata in _metadata_log(config)["runs"]:
+        if metadata.get("status") not in {None, "created"}:
+            continue
+        request = metadata.get("request", {})
+        if request.get("drive_path") != config.drive_path or request.get("year") != config.year:
+            continue
+        output_paths = metadata.get("output_paths", {})
+        required = [output_paths.get("summary_excel"), output_paths.get("detail_excel"), output_paths.get("receipts_dir")]
+        if all(path and Path(path).exists() for path in required):
+            runs.append(metadata)
+    return runs
+
+
+def existing_months_in_metadata(config: RequestConfig) -> set[int]:
+    """Return requested months already covered by successful metadata for this Drive path/year."""
+    months: set[int] = set()
+    requested = set(range(config.start_month, config.end_month + 1))
+    for metadata in _created_metadata_for_drive_year(config):
+        request = metadata.get("request", {})
+        try:
+            start_month = int(request.get("start_month", 0))
+            end_month = int(request.get("end_month", 0))
+        except (TypeError, ValueError):
+            continue
+        months.update(month for month in range(start_month, end_month + 1) if month in requested)
+    return months
+
+
+def missing_months_in_metadata(config: RequestConfig) -> list[int]:
+    existing = existing_months_in_metadata(config)
+    return [month for month in range(config.start_month, config.end_month + 1) if month not in existing]
+
+
+def format_month_list(months: Iterable[int]) -> str:
+    return ", ".join(f"{month:02d}-{MONTH_NAMES[month - 1]}" for month in months)
+
+
 def _receipt_month(sale: BankSale, config: RequestConfig) -> str:
     month = sale.entry_date.month if sale.entry_date else config.start_month
     return f"{month:02d}"
@@ -508,9 +655,9 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
     _write_xlsx(detail_excel, headers, detail_rows)
     start_datetime, end_datetime = _actual_transaction_window(rows)
     totals = _totals(rows)
-    summary_rows = [["start_datetime", start_datetime], ["end_datetime", end_datetime], *[[key, value] for key, value in totals.items()]]
+    summary_rows = _summary_table_rows(rows)
     notify(f"Writing summary Excel report: {summary_excel}")
-    _write_xlsx(summary_excel, ["metric", "value"], summary_rows)
+    _write_xlsx(summary_excel, ["period", "start_datetime", "end_datetime", "transaction_count", "bank_amount", "taxable_value", "cgst", "sgst"], summary_rows)
     metadata = {
         "status": "created",
         "request": _request_metadata(config),
@@ -518,6 +665,7 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
         "end_datetime": end_datetime,
         "created_on": datetime.now(UTC).isoformat(),
         "totals": totals,
+        "month_summaries": _monthly_summaries(rows),
         "output_paths": {
             "output_dir": str(out),
             "receipts_dir": str(receipts_root),
@@ -546,30 +694,33 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = config_with_cli_overrides(load_request_config(args.config_file), args)
     progress(f"Starting bank receipt generation for {config.year}-{config.start_month:02d} through {config.year}-{config.end_month:02d}")
-    if metadata := existing_output_metadata(config):
-        progress("Existing output found for this period; skipping Google Drive reads and reusing previous files")
-        reuse_metadata = {
-            "status": "existing_output",
-            "request": _request_metadata(config),
-            "created_on": datetime.now(UTC).isoformat(),
-            "reused_run_created_on": metadata.get("created_on", ""),
-            "start_datetime": metadata.get("start_datetime", ""),
-            "end_datetime": metadata.get("end_datetime", ""),
-            "totals": metadata.get("totals", {}),
-            "output_paths": metadata.get("output_paths", {}),
-        }
-        _append_metadata_run(config, reuse_metadata)
+    if metadata := existing_output_for_requested_months(config):
+        progress("Existing output covers the requested month range; skipping Google Drive reads without writing metadata")
         print(json.dumps({
             "status": "existing_output",
-            "message": "Output already exists for this period. Reusing the previous run.",
+            "message": "Output already covers this requested month range. Reusing the previous run.",
             "bank_transactions": metadata.get("totals", {}).get("transaction_count", 0),
+            "bank_amount": metadata.get("totals", {}).get("bank_amount", 0),
             "output_dir": metadata.get("output_paths", {}).get("output_dir", config.output_dir),
             "metadata": metadata.get("output_paths", {}).get("metadata", str(Path(config.output_dir) / METADATA_FILE)),
         }, indent=2))
         return 0
-    progress("No existing output found; reading from Google Drive")
+    months_to_process = missing_months_in_metadata(config)
+    skipped_months = [month for month in range(config.start_month, config.end_month + 1) if month not in months_to_process]
+    if skipped_months:
+        progress(f"Skipping already processed month(s): {format_month_list(skipped_months)}")
+    if not months_to_process:
+        progress("All requested months are already present in metadata; no Google Drive reads needed")
+        print(json.dumps({
+            "status": "existing_output",
+            "message": "All requested months are already present in metadata.",
+            "output_dir": config.output_dir,
+            "metadata": str(Path(config.output_dir) / METADATA_FILE),
+        }, indent=2))
+        return 0
+    progress(f"Reading from Google Drive only for missing month(s): {format_month_list(months_to_process)}")
     reader = GoogleSheetReader(config.credentials_file)
-    sales = collect_bank_sales(reader, config.drive_path, config.year, config.start_month, config.end_month, config.selling_address)
+    sales = collect_bank_sales(reader, config.drive_path, config.year, config.start_month, config.end_month, config.selling_address, months=months_to_process)
     progress(f"Finished reading Google Sheets; collected {len(sales)} bank transaction(s)")
     metadata = write_outputs(sales, config)
     print(json.dumps({
