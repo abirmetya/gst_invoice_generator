@@ -312,3 +312,37 @@ def test_missing_months_excludes_partial_overlap_from_metadata(tmp_path):
 
     assert existing_months_in_metadata(config) == {4, 5}
     assert missing_months_in_metadata(config) == [3, 6]
+
+
+def test_processed_receipt_days_groups_receipts_by_entry_date(tmp_path):
+    from gst_invoice_generator.core import _write_xlsx
+    from gst_invoice_generator.service import processed_receipt_days
+
+    receipts_dir = tmp_path / "06" / "receipts"
+    receipts_dir.mkdir(parents=True)
+    receipt = receipts_dir / "BANK-00001.pdf"
+    receipt.write_bytes(b"pdf")
+    detail_excel = tmp_path / "bank_transactions_detailed.xlsx"
+    _write_xlsx(
+        detail_excel,
+        ["receipt_no", "entry_date", "bank_amount"],
+        [["BANK-00001", "2026-06-24", 1050.0]],
+    )
+    (tmp_path / "generation_metadata.json").write_text(json.dumps({
+        "runs": [
+            {
+                "status": "created",
+                "output_paths": {
+                    "detail_excel": str(detail_excel),
+                    "receipt_dirs": [str(receipts_dir)],
+                    "receipts_dir": str(tmp_path),
+                },
+            }
+        ]
+    }), encoding="utf-8")
+
+    days = processed_receipt_days(tmp_path)
+
+    assert days["2026-06-24"]["transaction_count"] == 1
+    assert days["2026-06-24"]["bank_amount"] == 1050.0
+    assert days["2026-06-24"]["receipt_paths"] == [str(receipt)]
