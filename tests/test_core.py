@@ -244,8 +244,7 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
     summary_rows = list(workbook.active.iter_rows(values_only=True))
     workbook.close()
     assert summary_rows[0] == ("period", "start_datetime", "end_datetime", "transaction_count", "bank_amount", "taxable_value", "cgst", "sgst")
-    assert summary_rows[1][0] == "TOTAL"
-    assert summary_rows[2][0] == "06-June"
+    assert summary_rows[1][0] == "06-June"
 
 
 def test_processed_ranges_reads_created_runs(tmp_path):
@@ -441,4 +440,4 @@ def test_write_outputs_appends_detail_and_summary_workbooks(tmp_path):
     summary_workbook.close()
 
     assert [row[0] for row in detail_rows[1:]] == ["BANK-00001", "BANK-00002"]
-    assert [row[0] for row in summary_rows] == ["period", "TOTAL", "06-June", "TOTAL", "07-July"]
+    assert [row[0] for row in summary_rows] == ["period", "06-June", "07-July"]

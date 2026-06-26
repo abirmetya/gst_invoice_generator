@@ -490,9 +490,7 @@ def _monthly_summaries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _summary_table_rows(rows: list[dict[str, Any]]) -> list[list[Any]]:
-    start_datetime, end_datetime = _actual_transaction_window(rows)
-    totals = _totals(rows)
-    table_rows = [["TOTAL", start_datetime, end_datetime, *[totals[key] for key in ("transaction_count", "bank_amount", "taxable_value", "cgst", "sgst")]]]
+    table_rows: list[list[Any]] = []
     for summary in _monthly_summaries(rows):
         table_rows.append([
             f"{summary['month']:02d}-{summary['month_name']}",
