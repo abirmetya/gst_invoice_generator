@@ -291,10 +291,12 @@ class GoogleSheetReader:
         return result.get("values", [])
 
 
-def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, start_month: int, end_month: int, selling_address: str, progress_callback: Any | None = None) -> list[BankSale]:
+def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, start_month: int, end_month: int, selling_address: str, progress_callback: Any | None = None, months: Iterable[int] | None = None) -> list[BankSale]:
     notify = progress_callback or progress
     sales: list[BankSale] = []
-    for folder_path in build_folder_paths(drive_path, year, start_month, end_month):
+    selected_months = list(months) if months is not None else list(range(start_month, end_month + 1))
+    for month in selected_months:
+        folder_path = build_folder_paths(drive_path, year, month, month)[0]
         notify(f"Opening Drive folder: {folder_path}")
         folder_id = reader.folder_id_for_path(folder_path)
         spreadsheets = reader.spreadsheet_ids_in_folder(folder_id)
@@ -476,6 +478,46 @@ def existing_output_metadata(config: RequestConfig) -> dict[str, Any] | None:
     return None
 
 
+
+def _created_metadata_for_drive_year(config: RequestConfig) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    for metadata in _metadata_log(config)["runs"]:
+        if metadata.get("status") not in {None, "created"}:
+            continue
+        request = metadata.get("request", {})
+        if request.get("drive_path") != config.drive_path or request.get("year") != config.year:
+            continue
+        output_paths = metadata.get("output_paths", {})
+        required = [output_paths.get("summary_excel"), output_paths.get("detail_excel"), output_paths.get("receipts_dir")]
+        if all(path and Path(path).exists() for path in required):
+            runs.append(metadata)
+    return runs
+
+
+def existing_months_in_metadata(config: RequestConfig) -> set[int]:
+    """Return requested months already covered by successful metadata for this Drive path/year."""
+    months: set[int] = set()
+    requested = set(range(config.start_month, config.end_month + 1))
+    for metadata in _created_metadata_for_drive_year(config):
+        request = metadata.get("request", {})
+        try:
+            start_month = int(request.get("start_month", 0))
+            end_month = int(request.get("end_month", 0))
+        except (TypeError, ValueError):
+            continue
+        months.update(month for month in range(start_month, end_month + 1) if month in requested)
+    return months
+
+
+def missing_months_in_metadata(config: RequestConfig) -> list[int]:
+    existing = existing_months_in_metadata(config)
+    return [month for month in range(config.start_month, config.end_month + 1) if month not in existing]
+
+
+def format_month_list(months: Iterable[int]) -> str:
+    return ", ".join(f"{month:02d}-{MONTH_NAMES[month - 1]}" for month in months)
+
+
 def _receipt_month(sale: BankSale, config: RequestConfig) -> str:
     month = sale.entry_date.month if sale.entry_date else config.start_month
     return f"{month:02d}"
@@ -567,9 +609,29 @@ def main(argv: list[str] | None = None) -> int:
             "metadata": metadata.get("output_paths", {}).get("metadata", str(Path(config.output_dir) / METADATA_FILE)),
         }, indent=2))
         return 0
-    progress("No existing output found; reading from Google Drive")
+    months_to_process = missing_months_in_metadata(config)
+    skipped_months = [month for month in range(config.start_month, config.end_month + 1) if month not in months_to_process]
+    if skipped_months:
+        progress(f"Skipping already processed month(s): {format_month_list(skipped_months)}")
+    if not months_to_process:
+        progress("All requested months are already present in metadata; no Google Drive reads needed")
+        _append_metadata_run(config, {
+            "status": "existing_output",
+            "request": _request_metadata(config),
+            "created_on": datetime.now(UTC).isoformat(),
+            "message": "All requested months are already present in metadata.",
+            "output_paths": {"output_dir": config.output_dir, "metadata": str(Path(config.output_dir) / METADATA_FILE)},
+        })
+        print(json.dumps({
+            "status": "existing_output",
+            "message": "All requested months are already present in metadata.",
+            "output_dir": config.output_dir,
+            "metadata": str(Path(config.output_dir) / METADATA_FILE),
+        }, indent=2))
+        return 0
+    progress(f"Reading from Google Drive only for missing month(s): {format_month_list(months_to_process)}")
     reader = GoogleSheetReader(config.credentials_file)
-    sales = collect_bank_sales(reader, config.drive_path, config.year, config.start_month, config.end_month, config.selling_address)
+    sales = collect_bank_sales(reader, config.drive_path, config.year, config.start_month, config.end_month, config.selling_address, months=months_to_process)
     progress(f"Finished reading Google Sheets; collected {len(sales)} bank transaction(s)")
     metadata = write_outputs(sales, config)
     print(json.dumps({

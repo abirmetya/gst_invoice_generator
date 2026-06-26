@@ -13,6 +13,8 @@ from .core import (
     _request_metadata,
     collect_bank_sales,
     existing_output_metadata,
+    format_month_list,
+    missing_months_in_metadata,
     write_outputs,
 )
 
@@ -51,7 +53,7 @@ def run_generation(config: RequestConfig, progress_callback: ProgressCallback | 
     notify = progress_callback or (lambda _message: None)
     notify(f"Starting {config.year}-{config.start_month:02d} through {config.year}-{config.end_month:02d}")
     if metadata := existing_output_metadata(config):
-        notify("Existing output found; reusing generated files")
+        notify("Existing output found for the complete requested range; reusing generated files")
         reuse_metadata = {
             "status": "existing_output",
             "request": _request_metadata(config),
@@ -65,7 +67,23 @@ def run_generation(config: RequestConfig, progress_callback: ProgressCallback | 
         _append_metadata_run(config, reuse_metadata)
         return reuse_metadata
 
-    notify("No matching output found; reading Google Drive")
+    months_to_process = missing_months_in_metadata(config)
+    skipped_months = [month for month in range(config.start_month, config.end_month + 1) if month not in months_to_process]
+    if skipped_months:
+        notify(f"Skipping already processed month(s): {format_month_list(skipped_months)}")
+    if not months_to_process:
+        notify("All requested months are already present in metadata; no Google Drive reads needed")
+        reuse_metadata = {
+            "status": "existing_output",
+            "request": _request_metadata(config),
+            "created_on": datetime.now(UTC).isoformat(),
+            "message": "All requested months are already present in metadata.",
+            "output_paths": {"output_dir": config.output_dir, "metadata": str(Path(config.output_dir) / METADATA_FILE)},
+        }
+        _append_metadata_run(config, reuse_metadata)
+        return reuse_metadata
+
+    notify(f"Reading Google Drive only for missing month(s): {format_month_list(months_to_process)}")
     reader = GoogleSheetReader(config.credentials_file)
     sales = collect_bank_sales(
         reader,
@@ -75,6 +93,7 @@ def run_generation(config: RequestConfig, progress_callback: ProgressCallback | 
         config.end_month,
         config.selling_address,
         progress_callback=notify,
+        months=months_to_process,
     )
     notify(f"Collected {len(sales)} bank transaction(s); writing outputs")
     metadata = write_outputs(sales, config, progress_callback=notify)

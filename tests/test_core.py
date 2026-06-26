@@ -9,8 +9,10 @@ from gst_invoice_generator.core import (
     _append_metadata_run,
     build_folder_paths,
     config_with_cli_overrides,
+    existing_months_in_metadata,
     existing_output_metadata,
     load_request_config,
+    missing_months_in_metadata,
     sheet_is_in_requested_range,
     extract_iob_amount,
     normalize_rows,
@@ -274,3 +276,39 @@ def test_processed_ranges_reads_created_runs(tmp_path):
     assert len(ranges) == 1
     assert ranges[0]["year"] == 2026
     assert ranges[0]["transaction_count"] == 3
+
+
+def test_missing_months_excludes_partial_overlap_from_metadata(tmp_path):
+    for name in ("bank_transactions_summary.xlsx", "bank_transactions_detailed.xlsx"):
+        (tmp_path / name).write_text("placeholder", encoding="utf-8")
+    (tmp_path / "receipts").mkdir()
+    metadata_file = tmp_path / "generation_metadata.json"
+    metadata_file.write_text(json.dumps({
+        "runs": [
+            {
+                "status": "created",
+                "request": {
+                    "drive_path": "Google_Business_Data/Daily_Operation",
+                    "year": 2026,
+                    "start_month": 4,
+                    "end_month": 5,
+                },
+                "output_paths": {
+                    "summary_excel": str(tmp_path / "bank_transactions_summary.xlsx"),
+                    "detail_excel": str(tmp_path / "bank_transactions_detailed.xlsx"),
+                    "receipts_dir": str(tmp_path / "receipts"),
+                },
+            }
+        ]
+    }), encoding="utf-8")
+    config = RequestConfig(
+        credentials_file="creds.json",
+        drive_path="Google_Business_Data/Daily_Operation",
+        year=2026,
+        start_month=3,
+        end_month=6,
+        output_dir=str(tmp_path),
+    )
+
+    assert existing_months_in_metadata(config) == {4, 5}
+    assert missing_months_in_metadata(config) == [3, 6]

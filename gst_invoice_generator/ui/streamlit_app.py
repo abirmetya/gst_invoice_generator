@@ -23,7 +23,7 @@ def _month_label(month: int | None) -> str:
 def _file_download(path: str | Path, label: str, mime: str) -> None:
     file_path = Path(path)
     if file_path.exists():
-        st.download_button(label, file_path.read_bytes(), file_name=file_path.name, mime=mime, use_container_width=True)
+        st.download_button(label, file_path.read_bytes(), file_name=file_path.name, mime=mime, use_container_width=True, on_click="ignore")
 
 
 def _zip_receipts(receipts_dir: str | Path) -> bytes | None:
@@ -76,9 +76,17 @@ def _render_processed_ranges(output_dir: str) -> None:
             )
 
 
+def _close_downloads() -> None:
+    st.session_state.show_downloads = False
+
+
 def _render_downloads(metadata: dict[str, Any]) -> None:
     paths = metadata.get("output_paths", {})
-    st.subheader("Download outputs")
+    header_cols = st.columns([4, 1])
+    with header_cols[0]:
+        st.subheader("Download outputs")
+    with header_cols[1]:
+        st.button("Close", key="close_downloads", use_container_width=True, on_click=_close_downloads)
     cols = st.columns(4)
     with cols[0]:
         _file_download(paths.get("detail_excel", ""), "Detailed Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -88,7 +96,7 @@ def _render_downloads(metadata: dict[str, Any]) -> None:
         _file_download(paths.get("metadata", ""), "Metadata JSON", "application/json")
     with cols[3]:
         if receipt_zip := _zip_receipts(paths.get("receipts_dir", "")):
-            st.download_button("Receipts ZIP", receipt_zip, file_name="receipts.zip", mime="application/zip", use_container_width=True)
+            st.download_button("Receipts ZIP", receipt_zip, file_name="receipts.zip", mime="application/zip", use_container_width=True, on_click="ignore")
 
 
 st.markdown(
@@ -139,6 +147,11 @@ with right:
 
 start = st.button("✨ Start generation", type="primary", use_container_width=True)
 
+if "show_downloads" not in st.session_state:
+    st.session_state.show_downloads = False
+if "latest_metadata" not in st.session_state:
+    st.session_state.latest_metadata = None
+
 if start:
     try:
         config = RequestConfig(
@@ -175,6 +188,10 @@ if start:
         c1.metric("Transactions", totals.get("transaction_count", 0))
         c2.metric("Bank amount", f"₹{float(totals.get('bank_amount') or 0):,.2f}")
         c3.metric("Status", metadata.get("status", "done"))
-        _render_downloads(metadata)
+        st.session_state.latest_metadata = metadata
+        st.session_state.show_downloads = True
     except Exception as exc:
         st.error(f"Generation failed: {exc}")
+
+if st.session_state.get("show_downloads") and st.session_state.get("latest_metadata"):
+    _render_downloads(st.session_state.latest_metadata)
