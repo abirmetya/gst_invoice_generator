@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import html
 import importlib
 import json
 import math
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, Iterable
+from xml.sax.saxutils import escape
 
 GST_RATE = 0.05
+METADATA_FILE = "generation_metadata.json"
 CGST_RATE = 0.025
 SGST_RATE = 0.025
 IOB_PATTERN = re.compile(r"\bIOB(?:\s*[-:]\s*([0-9][0-9,]*(?:\.\d+)?))?\b", re.IGNORECASE)
@@ -277,16 +278,90 @@ def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, st
     return sales
 
 
-def receipt_html(sale: BankSale, receipt_no: str, seller_name: str, seller_gstin: str) -> str:
-    invoice_date = sale.entry_date.isoformat() if sale.entry_date else ""
-    return f"""<!doctype html>
-<html><head><meta charset=\"utf-8\"><title>Receipt {html.escape(receipt_no)}</title>
-<style>body{{font-family:Arial,sans-serif;margin:32px;color:#222}}.top{{display:flex;justify-content:space-between}}table{{width:100%;border-collapse:collapse;margin-top:24px}}td,th{{border:1px solid #888;padding:8px;text-align:left}}.right{{text-align:right}}.muted{{color:#666}}</style></head>
-<body><div class=\"top\"><div><h1>Tax Invoice / Sale Receipt</h1><strong>{html.escape(seller_name)}</strong><br>{html.escape(sale.selling_address)}<br>GSTIN: {html.escape(seller_gstin)}</div><div><strong>Receipt No:</strong> {html.escape(receipt_no)}<br><strong>Date:</strong> {invoice_date}<br><strong>Payment:</strong> Bank / IOB</div></div>
-<h3>Bill To</h3><p><strong>{html.escape(sale.customer_name)}</strong><br>{html.escape(sale.billing_address)}<br>Phone: {html.escape(sale.phone)}</p>
-<table><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th class=\"right\">Taxable Rate</th><th class=\"right\">Taxable Value</th><th class=\"right\">CGST 2.5%</th><th class=\"right\">SGST 2.5%</th><th class=\"right\">Total</th></tr></thead>
-<tbody><tr><td>{html.escape(sale.item_type)}</td><td>{sale.qty_ordered:g}</td><td>{html.escape(sale.unit)}</td><td class=\"right\">{sale.adjusted_rate:.2f}</td><td class=\"right\">{sale.taxable_value:.2f}</td><td class=\"right\">{sale.cgst:.2f}</td><td class=\"right\">{sale.sgst:.2f}</td><td class=\"right\">{sale.bank_amount:.2f}</td></tr></tbody></table>
-<p class=\"muted\">Source: {html.escape(sale.source_sheet)} | Order Ref: {html.escape(sale.order_ref)} | Remarks: {html.escape(sale.remarks)}</p></body></html>"""
+def _money(value: float) -> str:
+    return f"Rs. {value:,.2f}"
+
+
+def _para_text(value: Any) -> str:
+    return escape(str(value or ""))
+
+
+def _receipt_pdf(path: Path, sale: BankSale, receipt_no: str, seller_name: str, seller_gstin: str) -> None:
+    colors = importlib.import_module("reportlab.lib.colors")
+    pagesizes = importlib.import_module("reportlab.lib.pagesizes")
+    styles_mod = importlib.import_module("reportlab.lib.styles")
+    units = importlib.import_module("reportlab.lib.units")
+    platypus = importlib.import_module("reportlab.platypus")
+
+    doc = platypus.SimpleDocTemplate(
+        str(path),
+        pagesize=pagesizes.A4,
+        rightMargin=18 * units.mm,
+        leftMargin=18 * units.mm,
+        topMargin=16 * units.mm,
+        bottomMargin=16 * units.mm,
+        title=f"Sale Receipt {receipt_no}",
+        author=seller_name,
+    )
+    styles = styles_mod.getSampleStyleSheet()
+    normal = styles["Normal"]
+    title = styles["Title"]
+    title.textColor = colors.HexColor("#12355B")
+    small = styles_mod.ParagraphStyle("Small", parent=normal, fontSize=8, leading=10, textColor=colors.HexColor("#5D6975"))
+    story: list[Any] = []
+
+    story.append(platypus.Table(
+        [[platypus.Paragraph(f"<b>{_para_text(seller_name)}</b><br/>{_para_text(sale.selling_address)}<br/>GSTIN: {_para_text(seller_gstin) or '-'}", normal),
+          platypus.Paragraph(f"<b>Tax Invoice / Sale Receipt</b><br/>Receipt No: {_para_text(receipt_no)}<br/>Date: {_para_text(sale.entry_date.isoformat() if sale.entry_date else '-')}<br/>Payment: Bank / IOB", normal)]],
+        colWidths=[105 * units.mm, 65 * units.mm],
+        style=[
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F3F7FB")),
+            ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#B8C7D9")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("PADDING", (0, 0), (-1, -1), 10),
+        ],
+    ))
+    story.append(platypus.Spacer(1, 10))
+    story.append(platypus.Paragraph("Bill To", title))
+    story.append(platypus.Paragraph(f"<b>{_para_text(sale.customer_name)}</b><br/>{_para_text(sale.billing_address) or '-'}<br/>Phone: {_para_text(sale.phone) or '-'}", normal))
+    story.append(platypus.Spacer(1, 12))
+
+    line_items = [
+        ["Item", "Qty", "Unit", "Taxable Rate", "Taxable Value", "CGST 2.5%", "SGST 2.5%", "Total"],
+        [_para_text(sale.item_type) or "-", f"{sale.qty_ordered:g}", _para_text(sale.unit) or "-", _money(sale.adjusted_rate),
+         _money(sale.taxable_value), _money(sale.cgst), _money(sale.sgst), _money(sale.bank_amount)],
+    ]
+    story.append(platypus.Table(
+        line_items,
+        repeatRows=1,
+        colWidths=[42 * units.mm, 14 * units.mm, 14 * units.mm, 24 * units.mm, 25 * units.mm, 21 * units.mm, 21 * units.mm, 25 * units.mm],
+        style=[
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#12355B")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D7DEE8")),
+            ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("PADDING", (0, 0), (-1, -1), 6),
+        ],
+    ))
+    story.append(platypus.Spacer(1, 10))
+    story.append(platypus.Table(
+        [["Taxable Value", _money(sale.taxable_value)], ["CGST", _money(sale.cgst)], ["SGST", _money(sale.sgst)], ["Grand Total", _money(sale.bank_amount)]],
+        colWidths=[35 * units.mm, 35 * units.mm],
+        hAlign="RIGHT",
+        style=[
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D7DEE8")),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E9F2FF")),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+            ("PADDING", (0, 0), (-1, -1), 6),
+        ],
+    ))
+    story.append(platypus.Spacer(1, 12))
+    story.append(platypus.Paragraph(f"Source: {_para_text(sale.source_sheet)} | Order Ref: {_para_text(sale.order_ref) or '-'} | Remarks: {_para_text(sale.remarks) or '-'}", small))
+    story.append(platypus.Paragraph("This is a computer-generated receipt.", small))
+    doc.build(story)
 
 
 def _write_xlsx(path: Path, headers: list[str], data_rows: list[list[Any]]) -> None:
@@ -302,7 +377,52 @@ def _write_xlsx(path: Path, headers: list[str], data_rows: list[list[Any]]) -> N
     workbook.save(path)
 
 
-def write_outputs(sales: Iterable[BankSale], output_dir: str, seller_name: str, seller_gstin: str) -> None:
+def _actual_transaction_window(rows: list[dict[str, Any]]) -> tuple[str, str]:
+    entry_dates = sorted(row["entry_date"] for row in rows if row.get("entry_date"))
+    if not entry_dates:
+        return "", ""
+    start = datetime.combine(entry_dates[0], time.min).isoformat()
+    end = datetime.combine(entry_dates[-1], time.max).replace(microsecond=0).isoformat()
+    return start, end
+
+
+def _totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "transaction_count": len(rows),
+        "bank_amount": round(sum(row["bank_amount"] for row in rows), 2),
+        "taxable_value": round(sum(row["taxable_value"] for row in rows), 2),
+        "cgst": round(sum(row["cgst"] for row in rows), 2),
+        "sgst": round(sum(row["sgst"] for row in rows), 2),
+    }
+
+
+def _request_metadata(config: RequestConfig) -> dict[str, Any]:
+    return {
+        "drive_path": config.drive_path,
+        "year": config.year,
+        "start_month": config.start_month,
+        "end_month": config.end_month,
+    }
+
+
+def existing_output_metadata(config: RequestConfig) -> dict[str, Any] | None:
+    metadata_path = Path(config.output_dir) / METADATA_FILE
+    if not metadata_path.exists():
+        return None
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("request") != _request_metadata(config):
+        return None
+    output_paths = metadata.get("output_paths", {})
+    required = [output_paths.get("summary_excel"), output_paths.get("detail_excel"), output_paths.get("receipts_dir")]
+    if all(path and Path(path).exists() for path in required):
+        return metadata
+    return None
+
+
+def write_outputs(sales: Iterable[BankSale], config: RequestConfig) -> dict[str, Any]:
+    seller_name = config.seller_name
+    seller_gstin = config.seller_gstin
+    output_dir = config.output_dir
     out = Path(output_dir)
     receipts_dir = out / "receipts"
     receipts_dir.mkdir(parents=True, exist_ok=True)
@@ -311,18 +431,32 @@ def write_outputs(sales: Iterable[BankSale], output_dir: str, seller_name: str, 
         sale = BankSale(**row)
         receipt_no = f"BANK-{idx:05d}"
         row["receipt_no"] = receipt_no
-        (receipts_dir / f"{receipt_no}.html").write_text(receipt_html(sale, receipt_no, seller_name, seller_gstin), encoding="utf-8")
+        _receipt_pdf(receipts_dir / f"{receipt_no}.pdf", sale, receipt_no, seller_name, seller_gstin)
     headers = ["receipt_no", *[f.name for f in dataclasses.fields(BankSale)]]
     detail_rows = [[row.get(header, "") for header in headers] for row in rows]
-    _write_xlsx(out / "bank_transactions_detailed.xlsx", headers, detail_rows)
-    summary_rows = [
-        ["transaction_count", len(rows)],
-        ["bank_amount", round(sum(row["bank_amount"] for row in rows), 2)],
-        ["taxable_value", round(sum(row["taxable_value"] for row in rows), 2)],
-        ["cgst", round(sum(row["cgst"] for row in rows), 2)],
-        ["sgst", round(sum(row["sgst"] for row in rows), 2)],
-    ]
-    _write_xlsx(out / "bank_transactions_summary.xlsx", ["metric", "value"], summary_rows)
+    detail_excel = out / "bank_transactions_detailed.xlsx"
+    summary_excel = out / "bank_transactions_summary.xlsx"
+    _write_xlsx(detail_excel, headers, detail_rows)
+    start_datetime, end_datetime = _actual_transaction_window(rows)
+    totals = _totals(rows)
+    summary_rows = [["start_datetime", start_datetime], ["end_datetime", end_datetime], *[[key, value] for key, value in totals.items()]]
+    _write_xlsx(summary_excel, ["metric", "value"], summary_rows)
+    metadata = {
+        "request": _request_metadata(config),
+        "start_datetime": start_datetime,
+        "end_datetime": end_datetime,
+        "created_on": datetime.now(UTC).isoformat(),
+        "totals": totals,
+        "output_paths": {
+            "output_dir": str(out),
+            "receipts_dir": str(receipts_dir),
+            "detail_excel": str(detail_excel),
+            "summary_excel": str(summary_excel),
+            "metadata": str(out / METADATA_FILE),
+        },
+    }
+    (out / METADATA_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return metadata
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -339,10 +473,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--selling-address", help="Override selling_address from config.")
     args = parser.parse_args(argv)
     config = config_with_cli_overrides(load_request_config(args.config_file), args)
+    if metadata := existing_output_metadata(config):
+        print(json.dumps({
+            "status": "existing_output",
+            "message": "Output already exists for this period. Reusing the previous run.",
+            "bank_transactions": metadata.get("totals", {}).get("transaction_count", 0),
+            "output_dir": metadata.get("output_paths", {}).get("output_dir", config.output_dir),
+            "metadata": metadata.get("output_paths", {}).get("metadata", str(Path(config.output_dir) / METADATA_FILE)),
+        }, indent=2))
+        return 0
     reader = GoogleSheetReader(config.credentials_file)
     sales = collect_bank_sales(reader, config.drive_path, config.year, config.start_month, config.end_month, config.selling_address)
-    write_outputs(sales, config.output_dir, config.seller_name, config.seller_gstin)
-    print(json.dumps({"bank_transactions": len(sales), "output_dir": config.output_dir}, indent=2))
+    metadata = write_outputs(sales, config)
+    print(json.dumps({
+        "status": "created",
+        "bank_transactions": metadata["totals"]["transaction_count"],
+        "output_dir": metadata["output_paths"]["output_dir"],
+        "metadata": metadata["output_paths"]["metadata"],
+    }, indent=2))
     return 0
 
 
