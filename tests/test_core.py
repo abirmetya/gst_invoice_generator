@@ -246,3 +246,29 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
     _append_metadata_run(config, reused)
     log = json.loads((tmp_path / "generation_metadata.json").read_text(encoding="utf-8"))
     assert [run["status"] for run in log["runs"]] == ["created", "existing_output"]
+
+
+def test_processed_ranges_reads_created_runs(tmp_path):
+    from gst_invoice_generator.service import processed_ranges
+
+    metadata_file = tmp_path / "generation_metadata.json"
+    metadata_file.write_text(json.dumps({
+        "runs": [
+            {
+                "status": "created",
+                "request": {"year": 2026, "start_month": 4, "end_month": 6},
+                "start_datetime": "2026-04-01T00:00:00",
+                "end_datetime": "2026-06-30T23:59:59",
+                "created_on": "2026-06-26T00:00:00+00:00",
+                "totals": {"transaction_count": 3, "bank_amount": 1200.0},
+                "output_paths": {},
+            },
+            {"status": "existing_output", "request": {"year": 2026, "start_month": 4, "end_month": 6}},
+        ]
+    }), encoding="utf-8")
+
+    ranges = processed_ranges(tmp_path)
+
+    assert len(ranges) == 1
+    assert ranges[0]["year"] == 2026
+    assert ranges[0]["transaction_count"] == 3

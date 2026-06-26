@@ -285,22 +285,23 @@ class GoogleSheetReader:
         return result.get("values", [])
 
 
-def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, start_month: int, end_month: int, selling_address: str) -> list[BankSale]:
+def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, start_month: int, end_month: int, selling_address: str, progress_callback: Any | None = None) -> list[BankSale]:
+    notify = progress_callback or progress
     sales: list[BankSale] = []
     for folder_path in build_folder_paths(drive_path, year, start_month, end_month):
-        progress(f"Opening Drive folder: {folder_path}")
+        notify(f"Opening Drive folder: {folder_path}")
         folder_id = reader.folder_id_for_path(folder_path)
         spreadsheets = reader.spreadsheet_ids_in_folder(folder_id)
-        progress(f"Found {len(spreadsheets)} spreadsheet(s) in {folder_path}")
+        notify(f"Found {len(spreadsheets)} spreadsheet(s) in {folder_path}")
         for spreadsheet_id, sheet_name in spreadsheets:
             if not sheet_is_in_requested_range(sheet_name, year, start_month, end_month):
-                progress(f"Skipping outside requested range: {sheet_name}")
+                notify(f"Skipping outside requested range: {sheet_name}")
                 continue
-            progress(f"Reading SALES_ENTRY from: {sheet_name}")
+            notify(f"Reading SALES_ENTRY from: {sheet_name}")
             rows = normalize_rows(reader.read_sales_values(spreadsheet_id))
             sheet_sales = [s for row in rows if (s := row_to_bank_sale(row, sheet_name, selling_address))]
             sales.extend(sheet_sales)
-            progress(f"Collected {len(sheet_sales)} bank transaction(s) from {sheet_name}; running total: {len(sales)}")
+            notify(f"Collected {len(sheet_sales)} bank transaction(s) from {sheet_name}; running total: {len(sales)}")
     return sales
 
 
@@ -469,7 +470,8 @@ def existing_output_metadata(config: RequestConfig) -> dict[str, Any] | None:
     return None
 
 
-def write_outputs(sales: Iterable[BankSale], config: RequestConfig) -> dict[str, Any]:
+def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_callback: Any | None = None) -> dict[str, Any]:
+    notify = progress_callback or progress
     seller_name = config.seller_name
     seller_gstin = config.seller_gstin
     output_dir = config.output_dir
@@ -477,24 +479,24 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig) -> dict[str,
     receipts_dir = out / "receipts"
     receipts_dir.mkdir(parents=True, exist_ok=True)
     rows = [dataclasses.asdict(s) for s in sales]
-    progress(f"Writing {len(rows)} receipt PDF(s) to {receipts_dir}")
+    notify(f"Writing {len(rows)} receipt PDF(s) to {receipts_dir}")
     for idx, row in enumerate(rows, start=1):
         sale = BankSale(**row)
         receipt_no = f"BANK-{idx:05d}"
         row["receipt_no"] = receipt_no
         _receipt_pdf(receipts_dir / f"{receipt_no}.pdf", sale, receipt_no, seller_name, seller_gstin)
         if idx == 1 or idx == len(rows) or idx % 10 == 0:
-            progress(f"Wrote {idx}/{len(rows)} receipt PDF(s)")
+            notify(f"Wrote {idx}/{len(rows)} receipt PDF(s)")
     headers = ["receipt_no", *[f.name for f in dataclasses.fields(BankSale)]]
     detail_rows = [[row.get(header, "") for header in headers] for row in rows]
     detail_excel = out / "bank_transactions_detailed.xlsx"
     summary_excel = out / "bank_transactions_summary.xlsx"
-    progress(f"Writing detailed Excel report: {detail_excel}")
+    notify(f"Writing detailed Excel report: {detail_excel}")
     _write_xlsx(detail_excel, headers, detail_rows)
     start_datetime, end_datetime = _actual_transaction_window(rows)
     totals = _totals(rows)
     summary_rows = [["start_datetime", start_datetime], ["end_datetime", end_datetime], *[[key, value] for key, value in totals.items()]]
-    progress(f"Writing summary Excel report: {summary_excel}")
+    notify(f"Writing summary Excel report: {summary_excel}")
     _write_xlsx(summary_excel, ["metric", "value"], summary_rows)
     metadata = {
         "status": "created",
@@ -511,7 +513,7 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig) -> dict[str,
             "metadata": str(out / METADATA_FILE),
         },
     }
-    progress(f"Appending run metadata: {out / METADATA_FILE}")
+    notify(f"Appending run metadata: {out / METADATA_FILE}")
     return _append_metadata_run(config, metadata)
 
 
