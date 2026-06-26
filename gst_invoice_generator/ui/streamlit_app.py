@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
-from gst_invoice_generator.core import RequestConfig
+from gst_invoice_generator.core import RequestConfig, load_request_config
 from gst_invoice_generator.service import processed_ranges, run_generation
 
 st.set_page_config(page_title="GST Invoice Studio", page_icon="🧾", layout="wide")
@@ -29,11 +30,29 @@ def _zip_receipts(receipts_dir: str | Path) -> bytes | None:
     directory = Path(receipts_dir)
     if not directory.exists():
         return None
+    receipts = sorted(directory.rglob("*.pdf"))
+    if not receipts:
+        return None
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for receipt in sorted(directory.glob("*.pdf")):
-            archive.write(receipt, receipt.name)
+        for receipt in receipts:
+            archive.write(receipt, receipt.relative_to(directory))
     return buffer.getvalue()
+
+
+def _configured_options(raw_config: dict[str, Any], key: str, fallback: str) -> list[str]:
+    value = raw_config.get(key, fallback)
+    if isinstance(value, list):
+        options = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        options = [str(value).strip()] if str(value).strip() else []
+    return options or [fallback]
+
+
+def _load_sidebar_config(config_file: str) -> tuple[RequestConfig, dict[str, Any]]:
+    config_path = Path(config_file)
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    return load_request_config(str(config_path)), raw_config
 
 
 def _render_processed_ranges(output_dir: str) -> None:
@@ -90,14 +109,18 @@ st.markdown(
 
 with st.sidebar:
     st.header("Run setup")
-    credentials_file = st.text_input("Google credentials JSON", value="/secure/service-account.json")
-    drive_path = st.text_input("Drive sales folder", value="Google_Business_Data/Daily_Operation")
-    output_dir = st.text_input("Output folder", value="./outputs/apr-jun-2026")
-    seller_name = st.text_input("Seller name", value="Your Business Name")
-    seller_gstin = st.text_input("Seller GSTIN", value="YOURGSTIN")
-    selling_address = st.text_area("Selling address", value="Your shop / selling address")
+    config_file = st.text_input("Request config JSON", value="request_config.json")
+    try:
+        base_config, raw_config = _load_sidebar_config(config_file)
+    except Exception as exc:
+        st.error(f"Could not load request config: {exc}")
+        st.stop()
 
-_render_processed_ranges(output_dir)
+    seller_name = st.selectbox("Seller name", _configured_options(raw_config, "seller_name", base_config.seller_name))
+    seller_gstin = st.selectbox("Seller GSTIN", _configured_options(raw_config, "seller_gstin", base_config.seller_gstin))
+    selling_address = st.selectbox("Selling address", _configured_options(raw_config, "selling_address", base_config.selling_address))
+
+_render_processed_ranges(base_config.output_dir)
 
 st.divider()
 left, right = st.columns([2, 1])
@@ -119,12 +142,12 @@ start = st.button("✨ Start generation", type="primary", use_container_width=Tr
 if start:
     try:
         config = RequestConfig(
-            credentials_file=credentials_file,
-            drive_path=drive_path,
+            credentials_file=base_config.credentials_file,
+            drive_path=base_config.drive_path,
             year=int(year),
             start_month=int(start_month),
             end_month=int(end_month),
-            output_dir=output_dir,
+            output_dir=base_config.output_dir,
             seller_name=seller_name,
             seller_gstin=seller_gstin,
             selling_address=selling_address,

@@ -222,12 +222,14 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
 
     metadata = write_outputs([sale], config)
 
-    assert (tmp_path / "receipts" / "BANK-00001.pdf").exists()
+    assert (tmp_path / "06" / "receipts" / "BANK-00001.pdf").exists()
     assert (tmp_path / "bank_transactions_summary.xlsx").exists()
     assert (tmp_path / "generation_metadata.json").exists()
     assert metadata["start_datetime"] == "2026-06-24T00:00:00"
     assert metadata["end_datetime"] == "2026-06-24T23:59:59"
     assert metadata["totals"]["transaction_count"] == 1
+    assert metadata["output_paths"]["receipts_dir"] == str(tmp_path)
+    assert metadata["output_paths"]["receipt_dirs"] == [str(tmp_path / "06" / "receipts")]
     assert existing_output_metadata(config)["output_paths"]["output_dir"] == str(tmp_path)
     log = json.loads((tmp_path / "generation_metadata.json").read_text(encoding="utf-8"))
     assert len(log["runs"]) == 1
