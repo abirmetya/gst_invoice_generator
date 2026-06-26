@@ -188,3 +188,21 @@ python -m compileall gst_invoice_generator
 - Spreadsheet names without a parseable date are processed if they are inside a selected month folder.
 - The tool currently reads `SALES_ENTRY!A:N`; add columns after `N` only if the code is updated to read them.
 - Google API reads use retries and a longer socket timeout to reduce transient `TimeoutError` failures on large or slow runs.
+
+## Streamlit UI
+
+A lightweight Streamlit interface is available for users who prefer a guided workflow over CLI flags. It keeps UI code in `gst_invoice_generator/ui/streamlit_app.py`, while orchestration lives in `gst_invoice_generator/service.py` and reusable invoice logic remains in `gst_invoice_generator/core.py`.
+
+Start the app with:
+
+```bash
+streamlit run gst_invoice_generator/ui/streamlit_app.py
+```
+
+The app provides:
+
+- A clear setup sidebar for Google credentials, Drive path, seller details, and output folder.
+- Start/end month controls and a primary generation button.
+- Highlight cards for already processed ranges found in `generation_metadata.json`.
+- Live progress/status notifications during Google Drive reads and output generation.
+- Download buttons for the detailed Excel report, summary Excel report, metadata JSON, and a ZIP of PDF receipts.
