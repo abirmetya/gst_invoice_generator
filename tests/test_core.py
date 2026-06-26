@@ -1,16 +1,21 @@
 import argparse
 import json
 
+import pytest
+
 from gst_invoice_generator.core import (
     GoogleSheetReader,
     RequestConfig,
+    _append_metadata_run,
     build_folder_paths,
     config_with_cli_overrides,
+    existing_output_metadata,
     load_request_config,
     sheet_is_in_requested_range,
     extract_iob_amount,
     normalize_rows,
     row_to_bank_sale,
+    write_outputs,
 )
 
 
@@ -72,8 +77,8 @@ def test_row_to_bank_sale_treats_bank_amount_as_gst_inclusive():
 
 def test_build_folder_paths():
     assert build_folder_paths("Google_Business_Data/Daily_Operation", 2026, 1, 2) == [
-        "Google_Business_Data/Daily_Operation/01-January",
-        "Google_Business_Data/Daily_Operation/02-February",
+        "Google_Business_Data/Daily_Operation/2026/01_January",
+        "Google_Business_Data/Daily_Operation/2026/02_February",
     ]
 
 
@@ -184,3 +189,60 @@ def test_spreadsheet_lookup_searches_shared_drives():
     assert call["supportsAllDrives"] is True
     assert call["includeItemsFromAllDrives"] is True
     assert call["corpora"] == "allDrives"
+
+
+def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_path):
+    pytest.importorskip("reportlab")
+    row = {
+        "Entry_Date": "2026-06-24",
+        "Phone": "9999999999",
+        "Customer_Name": "Acme",
+        "Address": "Billing Addr",
+        "Item_Type": "Milk",
+        "Qty_Ordered": "10",
+        "Unit": "L",
+        "Rate": "105",
+        "Order_Value": "1050",
+        "Order_Ref": "ORD-1",
+        "Remarks": "IOB",
+        "Unnamed_Remarks": "",
+    }
+    sale = row_to_bank_sale(row, "Daily_Operations_2026-06-24", "Shop Addr")
+    config = RequestConfig(
+        credentials_file="creds.json",
+        drive_path="Google_Business_Data/Daily_Operation",
+        year=2026,
+        start_month=6,
+        end_month=6,
+        output_dir=str(tmp_path),
+        seller_name="Shop",
+        seller_gstin="GSTIN",
+        selling_address="Shop Addr",
+    )
+
+    metadata = write_outputs([sale], config)
+
+    assert (tmp_path / "receipts" / "BANK-00001.pdf").exists()
+    assert (tmp_path / "bank_transactions_summary.xlsx").exists()
+    assert (tmp_path / "generation_metadata.json").exists()
+    assert metadata["start_datetime"] == "2026-06-24T00:00:00"
+    assert metadata["end_datetime"] == "2026-06-24T23:59:59"
+    assert metadata["totals"]["transaction_count"] == 1
+    assert existing_output_metadata(config)["output_paths"]["output_dir"] == str(tmp_path)
+    log = json.loads((tmp_path / "generation_metadata.json").read_text(encoding="utf-8"))
+    assert len(log["runs"]) == 1
+
+    reused = {
+        "status": "existing_output",
+        "request": {
+            "drive_path": config.drive_path,
+            "year": config.year,
+            "start_month": config.start_month,
+            "end_month": config.end_month,
+        },
+        "created_on": "2026-06-26T00:00:00+00:00",
+        "output_paths": metadata["output_paths"],
+    }
+    _append_metadata_run(config, reused)
+    log = json.loads((tmp_path / "generation_metadata.json").read_text(encoding="utf-8"))
+    assert [run["status"] for run in log["runs"]] == ["created", "existing_output"]

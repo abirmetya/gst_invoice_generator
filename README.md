@@ -21,9 +21,10 @@ For a configured year and month range, it reads each Google Sheet's `SALES_ENTRY
 
 For every detected bank transaction, the generator writes:
 
-- `receipts/BANK-00001.html`, `receipts/BANK-00002.html`, etc. — one printable HTML receipt per bank sale.
+- `receipts/BANK-00001.pdf`, `receipts/BANK-00002.pdf`, etc. — one professionally formatted PDF receipt per bank sale.
 - `bank_transactions_detailed.xlsx` — transaction-level details including customer, item, bank amount, taxable value, CGST, SGST, source sheet, and remarks.
-- `bank_transactions_summary.xlsx` — totals for transaction count, bank amount, taxable value, CGST, and SGST.
+- `bank_transactions_summary.xlsx` — the actual bank transaction start/end datetimes plus totals for transaction count, bank amount, taxable value, CGST, and SGST.
+- `generation_metadata.json` — append-only run history with metadata, totals, output paths, and the requested period used to detect and reuse an existing output.
 
 All files are written inside the `output_dir` configured in your request JSON.
 
@@ -139,12 +140,14 @@ You can override any config value from the command line for a one-off run. For e
 python -m gst_invoice_generator --config-file ./request_config.json --start-month 5 --end-month 5
 ```
 
-On success, the command prints a small JSON summary such as:
+During execution, progress messages are printed to stderr so long runs show which Drive folder or spreadsheet is currently being processed. On success, the command prints a small JSON summary to stdout such as:
 
 ```json
 {
+  "status": "created",
   "bank_transactions": 24,
-  "output_dir": "./outputs/apr-jun-2026"
+  "output_dir": "outputs/apr-jun-2026",
+  "metadata": "outputs/apr-jun-2026/generation_metadata.json"
 }
 ```
 
@@ -156,9 +159,10 @@ If `output_dir` is `./outputs/apr-jun-2026`, the generated files will look like:
 outputs/apr-jun-2026/
 ├── bank_transactions_detailed.xlsx
 ├── bank_transactions_summary.xlsx
+├── generation_metadata.json
 └── receipts/
-    ├── BANK-00001.html
-    ├── BANK-00002.html
+    ├── BANK-00001.pdf
+    ├── BANK-00002.pdf
     └── ...
 ```
 
@@ -178,7 +182,9 @@ python -m compileall gst_invoice_generator
 
 ## Notes and limitations
 
-- Receipts are generated as HTML files so they can be opened in a browser and printed/saved as PDF if needed.
+- Receipts are generated directly as PDF files with ReportLab.
+- If `generation_metadata.json` already contains a successful run matching the requested Drive path, year, and month range, the CLI appends a new reuse event and reuses the existing output instead of reading Google Drive and regenerating files.
 - Spreadsheet names that include a `YYYY-MM-DD` date are filtered by the configured year/month range.
 - Spreadsheet names without a parseable date are processed if they are inside a selected month folder.
 - The tool currently reads `SALES_ENTRY!A:N`; add columns after `N` only if the code is updated to read them.
+- Google API reads use retries and a longer socket timeout to reduce transient `TimeoutError` failures on large or slow runs.
