@@ -20,6 +20,7 @@ GOOGLE_API_TIMEOUT_SECONDS = 120
 CGST_RATE = 0.025
 SGST_RATE = 0.025
 IOB_PATTERN = re.compile(r"\bIOB(?:\s*[-:]\s*([0-9][0-9,]*(?:\.\d+)?))?\b", re.IGNORECASE)
+PARTIAL_BANK_QUANTITY_EXCLUDED_ITEMS = {"due payment", "transport charges"}
 MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
@@ -61,6 +62,7 @@ class BankSale:
     cgst: float
     sgst: float
     adjusted_rate: float
+    discount_before_tax: float
     order_ref: str
     remarks: str
 
@@ -157,6 +159,30 @@ def extract_iob_amount(remarks: Any, unnamed_remarks: Any, order_value: Any) -> 
     return parse_money(explicit_amount) if explicit_amount else parse_money(order_value)
 
 
+def has_explicit_iob_amount(remarks: Any, unnamed_remarks: Any) -> bool:
+    combined = " ".join(str(v or "") for v in (remarks, unnamed_remarks))
+    match = IOB_PATTERN.search(combined)
+    return bool(match and match.group(1))
+
+
+def _uses_partial_bank_quantity(row: dict[str, Any], original_rate: float) -> bool:
+    item_type = str(row.get("Item_Type", "")).strip().lower()
+    return (
+        original_rate > 0
+        and item_type not in PARTIAL_BANK_QUANTITY_EXCLUDED_ITEMS
+        and has_explicit_iob_amount(row.get("Remarks"), row.get("Unnamed_Remarks"))
+    )
+
+
+def _partial_bank_quantity_and_discount(taxable: float, original_rate: float) -> tuple[float, float]:
+    exact_qty = taxable / original_rate
+    if math.isclose(exact_qty, round(exact_qty), abs_tol=0.000001):
+        return round(exact_qty, 6), 0.0
+    rounded_qty = math.ceil(exact_qty)
+    discount = round((rounded_qty * original_rate) - taxable, 2)
+    return float(rounded_qty), discount
+
+
 def normalize_rows(values: list[list[Any]]) -> list[dict[str, Any]]:
     if not values:
         return []
@@ -178,7 +204,13 @@ def row_to_bank_sale(row: dict[str, Any], source_sheet: str, company_selling_add
     if bank_amount <= 0:
         return None
     qty = parse_money(row.get("Qty_Ordered")) or 1.0
+    original_rate = parse_money(row.get("Rate"))
     taxable = round(bank_amount / (1 + GST_RATE), 2)
+    adjusted_rate = round(taxable / qty, 2)
+    discount_before_tax = 0.0
+    if _uses_partial_bank_quantity(row, original_rate):
+        qty, discount_before_tax = _partial_bank_quantity_and_discount(taxable, original_rate)
+        adjusted_rate = round(original_rate, 2)
     cgst = round(taxable * CGST_RATE, 2)
     sgst = round(taxable * SGST_RATE, 2)
     return BankSale(
@@ -191,13 +223,14 @@ def row_to_bank_sale(row: dict[str, Any], source_sheet: str, company_selling_add
         item_type=str(row.get("Item_Type", "")).strip(),
         qty_ordered=qty,
         unit=str(row.get("Unit", "")).strip(),
-        original_rate=parse_money(row.get("Rate")),
+        original_rate=original_rate,
         order_value=parse_money(row.get("Order_Value")),
         bank_amount=round(bank_amount, 2),
         taxable_value=taxable,
         cgst=cgst,
         sgst=sgst,
-        adjusted_rate=round(taxable / qty, 2),
+        adjusted_rate=adjusted_rate,
+        discount_before_tax=discount_before_tax,
         order_ref=str(row.get("Order_Ref", "")).strip(),
         remarks=" ".join(str(v or "").strip() for v in (row.get("Remarks"), row.get("Unnamed_Remarks"))).strip(),
     )
@@ -382,7 +415,7 @@ def _receipt_pdf(path: Path, sale: BankSale, receipt_no: str, seller_name: str, 
     ))
     story.append(platypus.Spacer(1, 10))
     story.append(platypus.Table(
-        [["Taxable Value", _money(sale.taxable_value)], ["CGST", _money(sale.cgst)], ["SGST", _money(sale.sgst)], ["Grand Total", _money(sale.bank_amount)]],
+        [["Taxable Value", _money(sale.taxable_value)], ["Discount Before Tax", _money(sale.discount_before_tax)], ["CGST", _money(sale.cgst)], ["SGST", _money(sale.sgst)], ["Grand Total", _money(sale.bank_amount)]],
         colWidths=[35 * units.mm, 35 * units.mm],
         hAlign="RIGHT",
         style=[

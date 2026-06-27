@@ -61,10 +61,22 @@ For each bank transaction, the tool recalculates:
 taxable_value = bank_amount / 1.05
 cgst = taxable_value * 0.025
 sgst = taxable_value * 0.025
+```
+
+For full-bank transactions such as `IOB`, and for `Due Payment` or `Transport Charges`, the receipt keeps the source `Qty_Ordered` and adjusts the taxable rate so the final total equals the bank amount:
+
+```text
 adjusted_rate = taxable_value / Qty_Ordered
 ```
 
-This means receipts do not blindly reuse the source sheet's `Rate`; the taxable rate is adjusted so the final total equals the bank amount.
+For partial-bank transactions such as `IOB-525` on other item types, the receipt keeps the source `Rate` as the taxable rate and adjusts quantity instead:
+
+```text
+qty_ordered = taxable_value / Rate
+adjusted_rate = Rate
+```
+
+If that partial-bank quantity is fractional, the tool rounds the receipt quantity up to the next whole unit and records the difference as a pre-tax discount, keeping taxable value, CGST, SGST, and grand total matched to the bank amount.
 
 ## Installation
 
