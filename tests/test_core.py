@@ -77,6 +77,73 @@ def test_row_to_bank_sale_treats_bank_amount_as_gst_inclusive():
     assert sale.adjusted_rate == 100.0
 
 
+
+def test_partial_iob_keeps_original_rate_and_reduces_quantity():
+    row = {
+        "Entry_Date": "2026-06-24",
+        "Phone": "9999999999",
+        "Customer_Name": "Acme",
+        "Address": "Billing Addr",
+        "Item_Type": "Milk",
+        "Qty_Ordered": "500",
+        "Unit": "L",
+        "Rate": "5",
+        "Order_Value": "2500",
+        "Order_Ref": "ORD-1",
+        "Remarks": "IOB-1050",
+        "Unnamed_Remarks": "",
+    }
+
+    sale = row_to_bank_sale(row, "Daily_Operations_2026-06-24", "Shop Addr")
+
+    assert sale is not None
+    assert sale.taxable_value == 1000.0
+    assert sale.qty_ordered == 500.0
+    assert sale.bank_qty_ordered == 200.0
+    assert sale.adjusted_rate == 5.0
+    assert sale.discount_before_tax == 0.0
+
+
+def test_partial_iob_rounds_decimal_quantity_with_pre_tax_discount():
+    row = {
+        "Item_Type": "Milk",
+        "Qty_Ordered": "500",
+        "Unit": "L",
+        "Rate": "5",
+        "Order_Value": "2500",
+        "Remarks": "IOB-1000",
+        "Unnamed_Remarks": "",
+    }
+
+    sale = row_to_bank_sale(row, "Daily_Operations_2026-06-24", "Shop Addr")
+
+    assert sale is not None
+    assert sale.taxable_value == 952.38
+    assert sale.qty_ordered == 500.0
+    assert sale.bank_qty_ordered == 191.0
+    assert sale.adjusted_rate == 5.0
+    assert sale.discount_before_tax == 2.62
+
+
+def test_partial_iob_excludes_due_payment_and_transport_charges_from_quantity_adjustment():
+    for item_type in ("Due Payment", "Transport Charges"):
+        row = {
+            "Item_Type": item_type,
+            "Qty_Ordered": "10",
+            "Rate": "5",
+            "Order_Value": "2500",
+            "Remarks": "IOB-1000",
+            "Unnamed_Remarks": "",
+        }
+
+        sale = row_to_bank_sale(row, "Daily_Operations_2026-06-24", "Shop Addr")
+
+        assert sale is not None
+        assert sale.qty_ordered == 10.0
+        assert sale.bank_qty_ordered == 10.0
+        assert sale.adjusted_rate == 95.24
+        assert sale.discount_before_tax == 0.0
+
 def test_build_folder_paths():
     assert build_folder_paths("Google_Business_Data/Daily_Operation", 2026, 1, 2) == [
         "Google_Business_Data/Daily_Operation/2026/01_January",
@@ -246,6 +313,61 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
     assert summary_rows[0] == ("period", "start_datetime", "end_datetime", "transaction_count", "bank_amount", "taxable_value", "cgst", "sgst")
     assert summary_rows[1][0] == "06-June"
 
+
+
+def test_write_outputs_keeps_original_and_department_excel_values(tmp_path):
+    pytest.importorskip("reportlab")
+    openpyxl = pytest.importorskip("openpyxl")
+    row = {
+        "Entry_Date": "2026-06-24",
+        "Phone": "9999999999",
+        "Customer_Name": "Acme",
+        "Address": "Billing Addr",
+        "Item_Type": "Milk",
+        "Qty_Ordered": "500",
+        "Unit": "L",
+        "Rate": "5",
+        "Order_Value": "2500",
+        "Order_Ref": "ORD-1",
+        "Remarks": "IOB-1050",
+        "Unnamed_Remarks": "",
+    }
+    sale = row_to_bank_sale(row, "Daily_Operations_2026-06-24", "Shop Addr")
+    config = RequestConfig(
+        credentials_file="creds.json",
+        drive_path="Google_Business_Data/Daily_Operation",
+        year=2026,
+        start_month=6,
+        end_month=6,
+        output_dir=str(tmp_path),
+        seller_name="Shop",
+        seller_gstin="GSTIN",
+        selling_address="Shop Addr",
+    )
+
+    metadata = write_outputs([sale], config)
+
+    detail_workbook = openpyxl.load_workbook(tmp_path / "bank_transactions_detailed.xlsx", read_only=True, data_only=True)
+    detail_rows = list(detail_workbook.active.iter_rows(values_only=True))
+    detail_workbook.close()
+    detail_header = list(detail_rows[0])
+    detail_row = dict(zip(detail_header, detail_rows[1], strict=False))
+    assert detail_row["qty_ordered"] == 500
+    assert detail_row["order_value"] == 2500
+    assert detail_row["bank_qty_ordered"] == 200
+    assert detail_row["bank_order_value"] == 1000
+
+    department_workbook = openpyxl.load_workbook(tmp_path / "bank_transactions_department.xlsx", read_only=True, data_only=True)
+    department_rows = list(department_workbook.active.iter_rows(values_only=True))
+    department_workbook.close()
+    department_header = list(department_rows[0])
+    department_row = dict(zip(department_header, department_rows[1], strict=False))
+    assert "original_rate" not in department_header
+    assert "bank_qty_ordered" not in department_header
+    assert "bank_order_value" not in department_header
+    assert department_row["qty_ordered"] == 200
+    assert department_row["order_value"] == 1000
+    assert metadata["output_paths"]["department_excel"] == str(tmp_path / "bank_transactions_department.xlsx")
 
 def test_processed_ranges_reads_created_runs(tmp_path):
     from gst_invoice_generator.service import processed_ranges

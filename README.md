@@ -22,7 +22,8 @@ For a configured year and month range, it reads each Google Sheet's `SALES_ENTRY
 For every detected bank transaction, the generator writes:
 
 - `receipts/BANK-00001.pdf`, `receipts/BANK-00002.pdf`, etc. — one professionally formatted PDF receipt per bank sale.
-- `bank_transactions_detailed.xlsx` — transaction-level details including customer, item, bank amount, taxable value, CGST, SGST, source sheet, and remarks.
+- `bank_transactions_detailed.xlsx` — transaction-level details including customer, item, original quantity/order value, bank-adjusted quantity/order value, bank amount, taxable value, CGST, SGST, source sheet, and remarks.
+- `bank_transactions_department.xlsx` — shareable transaction-level details with only bank-adjusted quantity/order value and without original values.
 - `bank_transactions_summary.xlsx` — the actual bank transaction start/end datetimes plus totals for transaction count, bank amount, taxable value, CGST, and SGST.
 - `generation_metadata.json` — append-only run history with metadata, totals, output paths, and the requested period used to detect and reuse an existing output.
 
@@ -61,10 +62,22 @@ For each bank transaction, the tool recalculates:
 taxable_value = bank_amount / 1.05
 cgst = taxable_value * 0.025
 sgst = taxable_value * 0.025
+```
+
+For full-bank transactions such as `IOB`, and for `Due Payment` or `Transport Charges`, the receipt keeps the source `Qty_Ordered` and adjusts the taxable rate so the final total equals the bank amount:
+
+```text
 adjusted_rate = taxable_value / Qty_Ordered
 ```
 
-This means receipts do not blindly reuse the source sheet's `Rate`; the taxable rate is adjusted so the final total equals the bank amount.
+For partial-bank transactions such as `IOB-525` on other item types, receipts and the department Excel keep the source `Rate` as the taxable rate and adjust quantity instead. The detailed Excel keeps both the original quantity/order value and the bank-adjusted quantity/order value:
+
+```text
+qty_ordered = taxable_value / Rate
+adjusted_rate = Rate
+```
+
+If that partial-bank quantity is fractional, the tool rounds the receipt quantity up to the next whole unit and records the difference as a pre-tax discount, keeping taxable value, CGST, SGST, and grand total matched to the bank amount.
 
 ## Installation
 
@@ -158,6 +171,7 @@ If `output_dir` is `./outputs/apr-jun-2026`, the generated files will look like:
 ```text
 outputs/apr-jun-2026/
 ├── bank_transactions_detailed.xlsx
+├── bank_transactions_department.xlsx
 ├── bank_transactions_summary.xlsx
 ├── generation_metadata.json
 └── receipts/

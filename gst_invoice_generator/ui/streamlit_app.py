@@ -122,14 +122,16 @@ def _render_downloads(metadata: dict[str, Any]) -> None:
         st.subheader("Download outputs")
     with header_cols[1]:
         st.button("Close", key="close_downloads", use_container_width=True, on_click=_close_downloads)
-    cols = st.columns(4)
+    cols = st.columns(5)
     with cols[0]:
         _file_download(paths.get("detail_excel", ""), "Detailed Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with cols[1]:
-        _file_download(paths.get("summary_excel", ""), "Summary Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        _file_download(paths.get("department_excel", ""), "Department Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with cols[2]:
-        _file_download(paths.get("metadata", ""), "Metadata JSON", "application/json")
+        _file_download(paths.get("summary_excel", ""), "Summary Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with cols[3]:
+        _file_download(paths.get("metadata", ""), "Metadata JSON", "application/json")
+    with cols[4]:
         if receipt_zip := _zip_receipts(paths.get("receipts_dir", "")):
             st.download_button("Receipts ZIP", receipt_zip, file_name="receipts.zip", mime="application/zip", use_container_width=True, on_click="ignore")
 
