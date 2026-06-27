@@ -54,9 +54,11 @@ class BankSale:
     selling_address: str
     item_type: str
     qty_ordered: float
+    bank_qty_ordered: float
     unit: str
     original_rate: float
     order_value: float
+    bank_order_value: float
     bank_amount: float
     taxable_value: float
     cgst: float
@@ -204,12 +206,13 @@ def row_to_bank_sale(row: dict[str, Any], source_sheet: str, company_selling_add
     if bank_amount <= 0:
         return None
     qty = parse_money(row.get("Qty_Ordered")) or 1.0
+    bank_qty = qty
     original_rate = parse_money(row.get("Rate"))
     taxable = round(bank_amount / (1 + GST_RATE), 2)
-    adjusted_rate = round(taxable / qty, 2)
+    adjusted_rate = round(taxable / bank_qty, 2)
     discount_before_tax = 0.0
     if _uses_partial_bank_quantity(row, original_rate):
-        qty, discount_before_tax = _partial_bank_quantity_and_discount(taxable, original_rate)
+        bank_qty, discount_before_tax = _partial_bank_quantity_and_discount(taxable, original_rate)
         adjusted_rate = round(original_rate, 2)
     cgst = round(taxable * CGST_RATE, 2)
     sgst = round(taxable * SGST_RATE, 2)
@@ -222,9 +225,11 @@ def row_to_bank_sale(row: dict[str, Any], source_sheet: str, company_selling_add
         selling_address=company_selling_address,
         item_type=str(row.get("Item_Type", "")).strip(),
         qty_ordered=qty,
+        bank_qty_ordered=bank_qty,
         unit=str(row.get("Unit", "")).strip(),
         original_rate=original_rate,
         order_value=parse_money(row.get("Order_Value")),
+        bank_order_value=taxable,
         bank_amount=round(bank_amount, 2),
         taxable_value=taxable,
         cgst=cgst,
@@ -396,7 +401,7 @@ def _receipt_pdf(path: Path, sale: BankSale, receipt_no: str, seller_name: str, 
 
     line_items = [
         ["Item", "Qty", "Unit", "Taxable Rate", "Taxable Value", "CGST 2.5%", "SGST 2.5%", "Total"],
-        [_para_text(sale.item_type) or "-", f"{sale.qty_ordered:g}", _para_text(sale.unit) or "-", _money(sale.adjusted_rate),
+        [_para_text(sale.item_type) or "-", f"{sale.bank_qty_ordered:g}", _para_text(sale.unit) or "-", _money(sale.adjusted_rate),
          _money(sale.taxable_value), _money(sale.cgst), _money(sale.sgst), _money(sale.bank_amount)],
     ]
     story.append(platypus.Table(
@@ -462,6 +467,19 @@ def _append_xlsx(path: Path, headers: list[str], data_rows: list[list[Any]]) -> 
         max_length = max(len(str(cell.value or "")) for cell in column_cells)
         sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 48)
     workbook.save(path)
+
+
+def _department_excel_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    department_rows: list[dict[str, Any]] = []
+    for row in rows:
+        department_row = dict(row)
+        department_row["qty_ordered"] = row.get("bank_qty_ordered", row.get("qty_ordered"))
+        department_row["order_value"] = row.get("bank_order_value", row.get("taxable_value"))
+        department_row.pop("bank_qty_ordered", None)
+        department_row.pop("bank_order_value", None)
+        department_row.pop("original_rate", None)
+        department_rows.append(department_row)
+    return department_rows
 
 
 def _receipt_number_value(receipt_no: Any) -> int:
@@ -705,6 +723,7 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
     notify(f"Writing {len(rows)} receipt PDF(s) under monthly folders in {receipts_root}")
     detail_excel = out / "bank_transactions_detailed.xlsx"
     summary_excel = out / "bank_transactions_summary.xlsx"
+    department_excel = out / "bank_transactions_department.xlsx"
     next_receipt_index = _next_receipt_index(detail_excel)
     for sequence, row in enumerate(rows, start=1):
         receipt_index = next_receipt_index + sequence - 1
@@ -723,6 +742,10 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
     start_datetime, end_datetime = _actual_transaction_window(rows)
     totals = _totals(rows)
     summary_rows = _summary_table_rows(rows)
+    department_headers = [header for header in headers if header not in {"bank_qty_ordered", "bank_order_value", "original_rate"}]
+    department_rows = _department_excel_rows(rows)
+    notify(f"Appending department Excel report: {department_excel}")
+    _append_xlsx(department_excel, department_headers, [[row.get(header, "") for header in department_headers] for row in department_rows])
     notify(f"Appending summary Excel report: {summary_excel}")
     _append_xlsx(summary_excel, ["period", "start_datetime", "end_datetime", "transaction_count", "bank_amount", "taxable_value", "cgst", "sgst"], summary_rows)
     metadata = {
@@ -738,6 +761,7 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
             "receipts_dir": str(receipts_root),
             "receipt_dirs": sorted(str(path) for path in receipts_root.glob("*/receipts") if path.is_dir()),
             "detail_excel": str(detail_excel),
+            "department_excel": str(department_excel),
             "summary_excel": str(summary_excel),
             "metadata": str(out / METADATA_FILE),
         },

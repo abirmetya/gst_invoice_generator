@@ -22,7 +22,8 @@ For a configured year and month range, it reads each Google Sheet's `SALES_ENTRY
 For every detected bank transaction, the generator writes:
 
 - `receipts/BANK-00001.pdf`, `receipts/BANK-00002.pdf`, etc. — one professionally formatted PDF receipt per bank sale.
-- `bank_transactions_detailed.xlsx` — transaction-level details including customer, item, bank amount, taxable value, CGST, SGST, source sheet, and remarks.
+- `bank_transactions_detailed.xlsx` — transaction-level details including customer, item, original quantity/order value, bank-adjusted quantity/order value, bank amount, taxable value, CGST, SGST, source sheet, and remarks.
+- `bank_transactions_department.xlsx` — shareable transaction-level details with only bank-adjusted quantity/order value and without original values.
 - `bank_transactions_summary.xlsx` — the actual bank transaction start/end datetimes plus totals for transaction count, bank amount, taxable value, CGST, and SGST.
 - `generation_metadata.json` — append-only run history with metadata, totals, output paths, and the requested period used to detect and reuse an existing output.
 
@@ -69,7 +70,7 @@ For full-bank transactions such as `IOB`, and for `Due Payment` or `Transport Ch
 adjusted_rate = taxable_value / Qty_Ordered
 ```
 
-For partial-bank transactions such as `IOB-525` on other item types, the receipt keeps the source `Rate` as the taxable rate and adjusts quantity instead:
+For partial-bank transactions such as `IOB-525` on other item types, receipts and the department Excel keep the source `Rate` as the taxable rate and adjust quantity instead. The detailed Excel keeps both the original quantity/order value and the bank-adjusted quantity/order value:
 
 ```text
 qty_ordered = taxable_value / Rate
@@ -170,6 +171,7 @@ If `output_dir` is `./outputs/apr-jun-2026`, the generated files will look like:
 ```text
 outputs/apr-jun-2026/
 ├── bank_transactions_detailed.xlsx
+├── bank_transactions_department.xlsx
 ├── bank_transactions_summary.xlsx
 ├── generation_metadata.json
 └── receipts/
