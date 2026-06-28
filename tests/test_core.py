@@ -563,3 +563,95 @@ def test_write_outputs_appends_detail_and_summary_workbooks(tmp_path):
 
     assert [row[0] for row in detail_rows[1:]] == ["BANK-00001", "BANK-00002"]
     assert [row[0] for row in summary_rows] == ["period", "06-June", "07-July"]
+
+
+class FakeDuePaymentReader:
+    def __init__(self, sheets_by_folder, values_by_id):
+        self.sheets_by_folder = sheets_by_folder
+        self.values_by_id = values_by_id
+        self.read_calls = []
+
+    def folder_id_for_path(self, drive_path):
+        if drive_path not in self.sheets_by_folder:
+            raise FileNotFoundError(drive_path)
+        return drive_path
+
+    def spreadsheet_ids_in_folder(self, folder_id):
+        return self.sheets_by_folder[folder_id]
+
+    def read_sales_values(self, spreadsheet_id):
+        self.read_calls.append(spreadsheet_id)
+        return self.values_by_id[spreadsheet_id]
+
+
+def _sales_values(rows):
+    return [
+        ["Entry_Date", "Phone", "Customer_Name", "Address", "Item_Type", "Qty_Ordered", "Unit", "Rate", "Order_Value", "Paid_Amount", "Due_Amount", "Order_Ref", "Remarks", ""],
+        *rows,
+    ]
+
+
+def test_collect_bank_sales_enriches_due_payment_from_original_order_once_per_source_file():
+    from gst_invoice_generator.core import collect_bank_sales
+
+    june_path = "Google_Business_Data/Daily_Operation/2026/06_June"
+    may_path = "Google_Business_Data/Daily_Operation/2026/05_May"
+    reader = FakeDuePaymentReader(
+        {
+            june_path: [("june-1", "Daily_Operations_2026-06-24")],
+            may_path: [("may-4", "Daily_Operations_2026-05-04")],
+        },
+        {
+            "june-1": _sales_values([
+                ["2026-06-24", "1", "Buyer", "Due Addr", "due_payment", "1", "", "100", "100", "100", "0", "DUE-1", "IOB-100 for ORD-20260504-0010", ""],
+                ["2026-06-24", "2", "Buyer", "Due Addr", "due payment", "1", "", "200", "200", "200", "0", "DUE-2", "IOB-200 for ORD-20260504-0010", ""],
+            ]),
+            "may-4": _sales_values([
+                ["2026-05-04", "9", "Original", "Original Billing", "Milk", "12", "L", "30", "360", "0", "360", "ORD-20260504-0010", "cash", ""],
+            ]),
+        },
+    )
+
+    sales = collect_bank_sales(reader, "Google_Business_Data/Daily_Operation", 2026, 6, 6, "Shop", progress_callback=lambda _msg: None)
+
+    assert [sale.original_order_billing_address for sale in sales] == ["Original Billing", "Original Billing"]
+    assert [sale.original_order_qty_ordered for sale in sales] == [12.0, 12.0]
+    assert [sale.original_order_rate for sale in sales] == [30.0, 30.0]
+    assert reader.read_calls == ["june-1", "may-4"]
+
+
+def test_due_payment_enrichment_logs_invalid_missing_unmatched_and_duplicate_matches():
+    from gst_invoice_generator.core import collect_bank_sales
+
+    june_path = "Google_Business_Data/Daily_Operation/2026/06_June"
+    may_path = "Google_Business_Data/Daily_Operation/2026/05_May"
+    messages = []
+    reader = FakeDuePaymentReader(
+        {
+            june_path: [("june-1", "Daily_Operations_2026-06-24")],
+            may_path: [("may-4", "Daily_Operations_2026-05-04")],
+        },
+        {
+            "june-1": _sales_values([
+                ["2026-06-24", "1", "Buyer", "Due Addr", "due_payment", "1", "", "100", "100", "100", "0", "DUE-1", "IOB without ref", ""],
+                ["2026-06-24", "2", "Buyer", "Due Addr", "due_payment", "1", "", "200", "200", "200", "0", "DUE-2", "IOB for ORD-20261340-0001", ""],
+                ["2026-06-24", "3", "Buyer", "Due Addr", "due_payment", "1", "", "300", "300", "300", "0", "DUE-3", "IOB for ORD-20260504-9999", ""],
+                ["2026-06-24", "4", "Buyer", "Due Addr", "due_payment", "1", "", "400", "400", "400", "0", "DUE-4", "IOB for ORD-20260401-0001", ""],
+                ["2026-06-24", "5", "Buyer", "Due Addr", "due_payment", "1", "", "500", "500", "500", "0", "DUE-5", "IOB for ORD-20260504-0010", ""],
+            ]),
+            "may-4": _sales_values([
+                ["2026-05-04", "9", "Original", "Addr A", "Milk", "12", "L", "30", "360", "0", "360", "ORD-20260504-0010", "cash", ""],
+                ["2026-05-04", "9", "Original", "Addr B", "Milk", "12", "L", "30", "360", "0", "360", "ORD-20260504-0010", "cash", ""],
+            ]),
+        },
+    )
+
+    sales = collect_bank_sales(reader, "Google_Business_Data/Daily_Operation", 2026, 6, 6, "Shop", progress_callback=messages.append)
+
+    assert len(sales) == 5
+    assert all(sale.original_order_billing_address == "" for sale in sales)
+    assert any("Invalid or missing due-payment order reference" in msg for msg in messages)
+    assert any("Malformed due-payment order reference" in msg for msg in messages)
+    assert any("Missing source folder" in msg for msg in messages)
+    assert any("not found in expected sheet" in msg for msg in messages)
+    assert any("Duplicate order-reference matches" in msg for msg in messages)
