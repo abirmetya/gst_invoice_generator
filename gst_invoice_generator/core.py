@@ -26,6 +26,7 @@ MONTH_NAMES = [
     "July", "August", "September", "October", "November", "December",
 ]
 SHEET_DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
+ORDER_REF_PATTERN = re.compile(r"ORD-\d{8}-\d+")
 SALES_COLUMNS = [
     "Entry_Date", "Phone", "Customer_Name", "Address", "Item_Type", "Qty_Ordered",
     "Unit", "Rate", "Order_Value", "Paid_Amount", "Due_Amount", "Order_Ref", "Remarks",
@@ -67,6 +68,9 @@ class BankSale:
     discount_before_tax: float
     order_ref: str
     remarks: str
+    original_order_billing_address: str = ""
+    original_order_qty_ordered: float = 0.0
+    original_order_rate: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -262,6 +266,117 @@ def sheet_is_in_requested_range(sheet_name: str, year: int, start_month: int, en
     return sheet_date.year == year and start_month <= sheet_date.month <= end_month
 
 
+def _normalized_order_ref(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def extract_order_ref_from_remarks(remarks: Any) -> str:
+    match = ORDER_REF_PATTERN.search(str(remarks or "").upper())
+    return match.group(0) if match else ""
+
+
+def order_date_from_ref(order_ref: str) -> date | None:
+    match = re.fullmatch(r"ORD-(\d{8})-\d+", _normalized_order_ref(order_ref))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _is_due_payment_sale(sale: BankSale) -> bool:
+    item_type = sale.item_type.strip().lower().replace("_", " ")
+    return item_type == "due payment"
+
+
+def _original_order_details(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "original_order_billing_address": str(row.get("Address", "")).strip(),
+        "original_order_qty_ordered": parse_money(row.get("Qty_Ordered")),
+        "original_order_rate": parse_money(row.get("Rate")),
+    }
+
+
+def _sales_by_order_ref(rows: list[dict[str, Any]], notify: Any, sheet_name: str) -> dict[str, dict[str, Any]]:
+    matches: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = _normalized_order_ref(row.get("Order_Ref"))
+        if key:
+            matches.setdefault(key, []).append(row)
+    unique: dict[str, dict[str, Any]] = {}
+    for key, key_rows in matches.items():
+        if len(key_rows) > 1:
+            notify(f"Duplicate order-reference matches in {sheet_name}: {key}; leaving due-payment enrichments blank")
+            continue
+        unique[key] = _original_order_details(key_rows[0])
+    return unique
+
+
+def _spreadsheet_for_order_date(reader: GoogleSheetReader, drive_path: str, order_date: date, notify: Any) -> tuple[str, str] | None:
+    folder_path = build_folder_paths(drive_path, order_date.year, order_date.month, order_date.month)[0]
+    try:
+        folder_id = reader.folder_id_for_path(folder_path)
+    except FileNotFoundError:
+        notify(f"Missing source folder for due-payment order date {order_date.isoformat()}: {folder_path}")
+        return None
+    spreadsheets = reader.spreadsheet_ids_in_folder(folder_id)
+    candidates = [(spreadsheet_id, sheet_name) for spreadsheet_id, sheet_name in spreadsheets if sheet_date_from_name(sheet_name) == order_date]
+    if not candidates:
+        notify(f"Missing source spreadsheet for due-payment order date {order_date.isoformat()} in {folder_path}")
+        return None
+    if len(candidates) > 1:
+        notify(f"Duplicate source spreadsheets for due-payment order date {order_date.isoformat()}; using {candidates[0][1]}")
+    return candidates[0]
+
+
+def enrich_due_payment_sales(reader: GoogleSheetReader, sales: list[BankSale], drive_path: str, notify: Any) -> list[BankSale]:
+    due_refs_by_date: dict[date, set[str]] = {}
+    refs_by_sale_index: dict[int, str] = {}
+    seen_refs: set[str] = set()
+    for index, sale in enumerate(sales):
+        if not _is_due_payment_sale(sale):
+            continue
+        order_ref = extract_order_ref_from_remarks(sale.remarks)
+        if not order_ref:
+            notify(f"Invalid or missing due-payment order reference in remarks: {sale.remarks or '-'}")
+            continue
+        normalized = _normalized_order_ref(order_ref)
+        if normalized in seen_refs:
+            notify(f"Duplicate due-payment transaction reference encountered: {normalized}")
+        seen_refs.add(normalized)
+        order_date = order_date_from_ref(normalized)
+        if order_date is None:
+            notify(f"Malformed due-payment order reference: {order_ref}")
+            continue
+        refs_by_sale_index[index] = normalized
+        due_refs_by_date.setdefault(order_date, set()).add(normalized)
+
+    if not due_refs_by_date:
+        return sales
+
+    details_by_ref: dict[str, dict[str, Any]] = {}
+    for order_date, order_refs in sorted(due_refs_by_date.items()):
+        source = _spreadsheet_for_order_date(reader, drive_path, order_date, notify)
+        if source is None:
+            continue
+        spreadsheet_id, sheet_name = source
+        notify(f"Reading due-payment source SALES_ENTRY from: {sheet_name}")
+        source_rows = normalize_rows(reader.read_sales_values(spreadsheet_id))
+        source_details = _sales_by_order_ref(source_rows, notify, sheet_name)
+        for order_ref in sorted(order_refs):
+            if order_ref not in source_details:
+                notify(f"Due-payment order reference not found in expected sheet {sheet_name}: {order_ref}")
+                continue
+            details_by_ref[order_ref] = source_details[order_ref]
+
+    enriched: list[BankSale] = []
+    for index, sale in enumerate(sales):
+        details = details_by_ref.get(refs_by_sale_index.get(index, ""))
+        enriched.append(dataclasses.replace(sale, **details) if details else sale)
+    return enriched
+
+
 class GoogleSheetReader:
     def __init__(self, credentials_file: str):
         socket.setdefaulttimeout(GOOGLE_API_TIMEOUT_SECONDS)
@@ -348,7 +463,7 @@ def collect_bank_sales(reader: GoogleSheetReader, drive_path: str, year: int, st
             sheet_sales = [s for row in rows if (s := row_to_bank_sale(row, sheet_name, selling_address))]
             sales.extend(sheet_sales)
             notify(f"Collected {len(sheet_sales)} bank transaction(s) from {sheet_name}; running total: {len(sales)}")
-    return sales
+    return enrich_due_payment_sales(reader, sales, drive_path, notify)
 
 
 def _money(value: float) -> str:
