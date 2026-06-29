@@ -69,6 +69,7 @@ class BankSale:
     order_ref: str
     remarks: str
     original_order_billing_address: str = ""
+    original_order_item_type: str = ""
     original_order_qty_ordered: float = 0.0
     original_order_rate: float = 0.0
 
@@ -180,6 +181,12 @@ def _uses_partial_bank_quantity(row: dict[str, Any], original_rate: float) -> bo
     )
 
 
+def _adjusted_rate_from_quantity(taxable: float, qty_ordered: float, discount_before_tax: float = 0.0) -> float:
+    if qty_ordered <= 0:
+        return 0.0
+    return round((taxable + discount_before_tax) / qty_ordered, 2)
+
+
 def _partial_bank_quantity_and_discount(taxable: float, original_rate: float) -> tuple[float, float]:
     exact_qty = taxable / original_rate
     if math.isclose(exact_qty, round(exact_qty), abs_tol=0.000001):
@@ -213,7 +220,7 @@ def row_to_bank_sale(row: dict[str, Any], source_sheet: str, company_selling_add
     bank_qty = qty
     original_rate = parse_money(row.get("Rate"))
     taxable = round(bank_amount / (1 + GST_RATE), 2)
-    adjusted_rate = round(taxable / bank_qty, 2)
+    adjusted_rate = _adjusted_rate_from_quantity(taxable, bank_qty)
     discount_before_tax = 0.0
     if _uses_partial_bank_quantity(row, original_rate):
         bank_qty, discount_before_tax = _partial_bank_quantity_and_discount(taxable, original_rate)
@@ -293,6 +300,7 @@ def _is_due_payment_sale(sale: BankSale) -> bool:
 def _original_order_details(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "original_order_billing_address": str(row.get("Address", "")).strip(),
+        "original_order_item_type": str(row.get("Item_Type", "")).strip(),
         "original_order_qty_ordered": parse_money(row.get("Qty_Ordered")),
         "original_order_rate": parse_money(row.get("Rate")),
     }
@@ -373,7 +381,16 @@ def enrich_due_payment_sales(reader: GoogleSheetReader, sales: list[BankSale], d
     enriched: list[BankSale] = []
     for index, sale in enumerate(sales):
         details = details_by_ref.get(refs_by_sale_index.get(index, ""))
-        enriched.append(dataclasses.replace(sale, **details) if details else sale)
+        if not details:
+            enriched.append(sale)
+            continue
+        original_qty_ordered = parse_money(details.get("original_order_qty_ordered"))
+        adjusted_rate = (
+            _adjusted_rate_from_quantity(sale.taxable_value, original_qty_ordered, sale.discount_before_tax)
+            if original_qty_ordered > 0
+            else sale.adjusted_rate
+        )
+        enriched.append(dataclasses.replace(sale, **details, adjusted_rate=adjusted_rate))
     return enriched
 
 
@@ -584,17 +601,70 @@ def _append_xlsx(path: Path, headers: list[str], data_rows: list[list[Any]]) -> 
     workbook.save(path)
 
 
+DEPARTMENT_HEADERS = [
+    "receipt_no",
+    "source_sheet",
+    "entry_date",
+    "phone",
+    "customer_name",
+    "billing_address",
+    "selling_address",
+    "item_type",
+    "qty_ordered",
+    "original_item_type",
+    "original_qty_ordered",
+    "unit",
+    "order_value",
+    "bank_amount",
+    "taxable_value",
+    "cgst",
+    "sgst",
+    "adjusted_rate",
+    "discount_before_tax",
+    "order_ref",
+    "remarks",
+]
+
+
 def _department_excel_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     department_rows: list[dict[str, Any]] = []
     for row in rows:
-        department_row = dict(row)
+        department_row = {header: row.get(header, "") for header in DEPARTMENT_HEADERS}
         department_row["qty_ordered"] = row.get("bank_qty_ordered", row.get("qty_ordered"))
         department_row["order_value"] = row.get("bank_order_value", row.get("taxable_value"))
-        department_row.pop("bank_qty_ordered", None)
-        department_row.pop("bank_order_value", None)
-        department_row.pop("original_rate", None)
+        if _is_due_payment_row(row):
+            department_row["original_item_type"] = str(row.get("original_order_item_type", "") or "")
+            original_qty_ordered = parse_money(row.get("original_order_qty_ordered"))
+            department_row["original_qty_ordered"] = original_qty_ordered if original_qty_ordered > 0 else ""
+        else:
+            department_row["original_item_type"] = ""
+            department_row["original_qty_ordered"] = ""
         department_rows.append(department_row)
     return department_rows
+
+
+def _is_due_payment_row(row: dict[str, Any]) -> bool:
+    item_type = str(row.get("item_type", "")).strip().lower().replace("_", " ")
+    return item_type == "due payment"
+
+
+def _validate_department_rows(rows: list[dict[str, Any]], expected_count: int) -> None:
+    if len(rows) != expected_count:
+        raise ValueError("Department output row count changed during processing")
+    invalid_columns = [
+        column
+        for row in rows
+        for column in row
+        if not str(column).strip() or str(column).startswith("Unnamed") or re.search(r"(_x|_y|_original)$", str(column))
+    ]
+    if invalid_columns:
+        raise ValueError(f"Unexpected department output columns: {sorted(set(invalid_columns))}")
+    for row in rows:
+        missing = [column for column in DEPARTMENT_HEADERS if column not in row]
+        if missing:
+            raise ValueError(f"Missing department output columns: {missing}")
+        if list(row) != DEPARTMENT_HEADERS:
+            raise ValueError("Department output columns are not in the required order")
 
 
 def _receipt_number_value(receipt_no: Any) -> int:
@@ -857,8 +927,9 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
     start_datetime, end_datetime = _actual_transaction_window(rows)
     totals = _totals(rows)
     summary_rows = _summary_table_rows(rows)
-    department_headers = [header for header in headers if header not in {"bank_qty_ordered", "bank_order_value", "original_rate"}]
+    department_headers = DEPARTMENT_HEADERS
     department_rows = _department_excel_rows(rows)
+    _validate_department_rows(department_rows, len(rows))
     notify(f"Appending department Excel report: {department_excel}")
     _append_xlsx(department_excel, department_headers, [[row.get(header, "") for header in department_headers] for row in department_rows])
     notify(f"Appending summary Excel report: {summary_excel}")
