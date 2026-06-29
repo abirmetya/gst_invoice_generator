@@ -422,7 +422,11 @@ def test_department_excel_due_payment_uses_original_columns_and_adjusted_rate(tm
         sale,
         original_order_item_type="Milk",
         original_order_qty_ordered=12.0,
-        adjusted_rate=7.94,
+        qty_ordered=3.0,
+        bank_qty_ordered=3.0,
+        unit="L",
+        adjusted_rate=30.0,
+        original_order_unit="L",
     )
     config = RequestConfig(
         credentials_file="creds.json",
@@ -445,10 +449,11 @@ def test_department_excel_due_payment_uses_original_columns_and_adjusted_rate(tm
     row = dict(zip(header, rows[1], strict=False))
     assert not any(str(column).startswith("Unnamed") or str(column).endswith(("_x", "_y", "_original")) for column in header)
     assert row["item_type"] == "due_payment"
-    assert row["qty_ordered"] == 1
+    assert row["qty_ordered"] == 3
     assert row["original_item_type"] == "Milk"
     assert row["original_qty_ordered"] == 12
-    assert row["adjusted_rate"] == 7.94
+    assert row["unit"] == "L"
+    assert row["adjusted_rate"] == 30
 
 def test_processed_ranges_reads_created_runs(tmp_path):
     from gst_invoice_generator.service import processed_ranges
@@ -699,8 +704,10 @@ def test_collect_bank_sales_enriches_due_payment_from_original_order_once_per_so
     assert [sale.original_order_item_type for sale in sales] == ["Milk", "Milk"]
     assert [sale.original_order_qty_ordered for sale in sales] == [12.0, 12.0]
     assert [sale.original_order_rate for sale in sales] == [30.0, 30.0]
-    assert [sale.adjusted_rate for sale in sales] == [8.33, 15.87]
-    assert [sale.qty_ordered for sale in sales] == [1.0, 1.0]
+    assert [sale.adjusted_rate for sale in sales] == [30.0, 30.0]
+    assert [sale.qty_ordered for sale in sales] == [3.0, 6.0]
+    assert [sale.bank_qty_ordered for sale in sales] == [3.0, 6.0]
+    assert [sale.unit for sale in sales] == ["L", "L"]
     assert reader.read_calls == ["june-1", "may-4"]
 
 
