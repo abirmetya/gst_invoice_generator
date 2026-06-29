@@ -365,9 +365,90 @@ def test_write_outputs_keeps_original_and_department_excel_values(tmp_path):
     assert "original_rate" not in department_header
     assert "bank_qty_ordered" not in department_header
     assert "bank_order_value" not in department_header
+    assert department_header == [
+        "receipt_no",
+        "source_sheet",
+        "entry_date",
+        "phone",
+        "customer_name",
+        "billing_address",
+        "selling_address",
+        "item_type",
+        "qty_ordered",
+        "original_item_type",
+        "original_qty_ordered",
+        "unit",
+        "order_value",
+        "bank_amount",
+        "taxable_value",
+        "cgst",
+        "sgst",
+        "adjusted_rate",
+        "discount_before_tax",
+        "order_ref",
+        "remarks",
+    ]
     assert department_row["qty_ordered"] == 200
+    assert department_row["original_item_type"] is None
+    assert department_row["original_qty_ordered"] is None
     assert department_row["order_value"] == 1000
     assert metadata["output_paths"]["department_excel"] == str(tmp_path / "bank_transactions_department.xlsx")
+
+
+def test_department_excel_due_payment_uses_original_columns_and_adjusted_rate(tmp_path):
+    pytest.importorskip("reportlab")
+    openpyxl = pytest.importorskip("openpyxl")
+    from dataclasses import replace
+
+    sale = row_to_bank_sale(
+        {
+            "Entry_Date": "2026-06-24",
+            "Phone": "1",
+            "Customer_Name": "Buyer",
+            "Address": "Due Addr",
+            "Item_Type": "due_payment",
+            "Qty_Ordered": "1",
+            "Unit": "",
+            "Rate": "100",
+            "Order_Value": "100",
+            "Order_Ref": "DUE-1",
+            "Remarks": "IOB-100 for ORD-20260504-0010",
+            "Unnamed_Remarks": "",
+        },
+        "Daily_Operations_2026-06-24",
+        "Shop Addr",
+    )
+    sale = replace(
+        sale,
+        original_order_item_type="Milk",
+        original_order_qty_ordered=12.0,
+        adjusted_rate=7.94,
+    )
+    config = RequestConfig(
+        credentials_file="creds.json",
+        drive_path="Google_Business_Data/Daily_Operation",
+        year=2026,
+        start_month=6,
+        end_month=6,
+        output_dir=str(tmp_path),
+        seller_name="Shop",
+        seller_gstin="GSTIN",
+        selling_address="Shop Addr",
+    )
+
+    write_outputs([sale], config)
+
+    workbook = openpyxl.load_workbook(tmp_path / "bank_transactions_department.xlsx", read_only=True, data_only=True)
+    rows = list(workbook.active.iter_rows(values_only=True))
+    workbook.close()
+    header = list(rows[0])
+    row = dict(zip(header, rows[1], strict=False))
+    assert not any(str(column).startswith("Unnamed") or str(column).endswith(("_x", "_y", "_original")) for column in header)
+    assert row["item_type"] == "due_payment"
+    assert row["qty_ordered"] == 1
+    assert row["original_item_type"] == "Milk"
+    assert row["original_qty_ordered"] == 12
+    assert row["adjusted_rate"] == 7.94
 
 def test_processed_ranges_reads_created_runs(tmp_path):
     from gst_invoice_generator.service import processed_ranges
@@ -615,8 +696,11 @@ def test_collect_bank_sales_enriches_due_payment_from_original_order_once_per_so
     sales = collect_bank_sales(reader, "Google_Business_Data/Daily_Operation", 2026, 6, 6, "Shop", progress_callback=lambda _msg: None)
 
     assert [sale.original_order_billing_address for sale in sales] == ["Original Billing", "Original Billing"]
+    assert [sale.original_order_item_type for sale in sales] == ["Milk", "Milk"]
     assert [sale.original_order_qty_ordered for sale in sales] == [12.0, 12.0]
     assert [sale.original_order_rate for sale in sales] == [30.0, 30.0]
+    assert [sale.adjusted_rate for sale in sales] == [8.33, 15.87]
+    assert [sale.qty_ordered for sale in sales] == [1.0, 1.0]
     assert reader.read_calls == ["june-1", "may-4"]
 
 
