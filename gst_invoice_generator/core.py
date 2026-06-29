@@ -20,7 +20,7 @@ GOOGLE_API_TIMEOUT_SECONDS = 120
 CGST_RATE = 0.025
 SGST_RATE = 0.025
 IOB_PATTERN = re.compile(r"\bIOB(?:\s*[-:]\s*([0-9][0-9,]*(?:\.\d+)?))?\b", re.IGNORECASE)
-PARTIAL_BANK_QUANTITY_EXCLUDED_ITEMS = {"due payment", "transport charges"}
+PARTIAL_BANK_QUANTITY_EXCLUDED_ITEMS = {"due payment", "due_payment", "transport charges"}
 MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
@@ -72,6 +72,7 @@ class BankSale:
     original_order_item_type: str = ""
     original_order_qty_ordered: float = 0.0
     original_order_rate: float = 0.0
+    original_order_unit: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -196,6 +197,26 @@ def _partial_bank_quantity_and_discount(taxable: float, original_rate: float) ->
     return float(rounded_qty), discount
 
 
+def _due_payment_adjusted_rate(original_order_rate: float, discount_before_tax: float = 0.0) -> float:
+    return round(original_order_rate, 2) if original_order_rate > 0 else 0.0
+
+
+def _nearest_integer_due_quantity(bank_order_value: float, adjusted_rate: float, discount_before_tax: float = 0.0) -> float:
+    if adjusted_rate <= 0:
+        return 0.0
+    exact_qty = (bank_order_value + discount_before_tax) / adjusted_rate
+    candidates = {max(1, int(math.floor(exact_qty))), max(1, int(round(exact_qty))), max(1, int(math.ceil(exact_qty)))}
+    best = min(
+        candidates,
+        key=lambda qty: (
+            abs(round((qty * adjusted_rate) - discount_before_tax, 2) - bank_order_value),
+            abs(qty - exact_qty),
+            qty,
+        ),
+    )
+    return float(best)
+
+
 def normalize_rows(values: list[list[Any]]) -> list[dict[str, Any]]:
     if not values:
         return []
@@ -303,6 +324,7 @@ def _original_order_details(row: dict[str, Any]) -> dict[str, Any]:
         "original_order_item_type": str(row.get("Item_Type", "")).strip(),
         "original_order_qty_ordered": parse_money(row.get("Qty_Ordered")),
         "original_order_rate": parse_money(row.get("Rate")),
+        "original_order_unit": str(row.get("Unit", "")).strip(),
     }
 
 
@@ -380,17 +402,31 @@ def enrich_due_payment_sales(reader: GoogleSheetReader, sales: list[BankSale], d
 
     enriched: list[BankSale] = []
     for index, sale in enumerate(sales):
-        details = details_by_ref.get(refs_by_sale_index.get(index, ""))
+        ref = refs_by_sale_index.get(index, "")
+        details = details_by_ref.get(ref)
         if not details:
             enriched.append(sale)
             continue
-        original_qty_ordered = parse_money(details.get("original_order_qty_ordered"))
-        adjusted_rate = (
-            _adjusted_rate_from_quantity(sale.taxable_value, original_qty_ordered, sale.discount_before_tax)
-            if original_qty_ordered > 0
-            else sale.adjusted_rate
-        )
-        enriched.append(dataclasses.replace(sale, **details, adjusted_rate=adjusted_rate))
+        original_order_rate = parse_money(details.get("original_order_rate"))
+        original_order_unit = str(details.get("original_order_unit", "") or "").strip()
+        if original_order_rate <= 0 or not original_order_unit:
+            notify(f"Missing due-payment original order rate or unit for {ref}; leaving calculated quantity and rate unchanged")
+            enriched.append(dataclasses.replace(sale, **details))
+            continue
+        adjusted_rate = _due_payment_adjusted_rate(original_order_rate, sale.discount_before_tax)
+        due_qty = _nearest_integer_due_quantity(sale.bank_order_value, adjusted_rate, sale.discount_before_tax)
+        if due_qty <= 0:
+            notify(f"Unable to calculate due-payment quantity for {ref}; leaving calculated quantity and rate unchanged")
+            enriched.append(dataclasses.replace(sale, **details))
+            continue
+        enriched.append(dataclasses.replace(
+            sale,
+            **details,
+            qty_ordered=due_qty,
+            bank_qty_ordered=due_qty,
+            unit=original_order_unit,
+            adjusted_rate=adjusted_rate,
+        ))
     return enriched
 
 
@@ -667,6 +703,21 @@ def _validate_department_rows(rows: list[dict[str, Any]], expected_count: int) -
             raise ValueError("Department output columns are not in the required order")
 
 
+def _validate_due_payment_rows(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        if not _is_due_payment_row(row):
+            continue
+        qty_ordered = parse_money(row.get("qty_ordered"))
+        bank_qty_ordered = parse_money(row.get("bank_qty_ordered"))
+        if not float(qty_ordered).is_integer() or not float(bank_qty_ordered).is_integer():
+            raise ValueError(f"Due-payment quantity must be an integer for order ref {row.get('order_ref') or '-'}")
+        if qty_ordered != bank_qty_ordered:
+            raise ValueError(f"Due-payment quantity mismatch for order ref {row.get('order_ref') or '-'}")
+        original_order_unit = str(row.get("original_order_unit", "") or "").strip()
+        if original_order_unit and str(row.get("unit", "") or "").strip() != original_order_unit:
+            raise ValueError(f"Due-payment unit mismatch for order ref {row.get('order_ref') or '-'}")
+
+
 def _receipt_number_value(receipt_no: Any) -> int:
     match = re.search(r"(\d+)$", str(receipt_no or ""))
     return int(match.group(1)) if match else 0
@@ -905,6 +956,7 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
     out.mkdir(parents=True, exist_ok=True)
     receipts_root = out
     rows = [dataclasses.asdict(s) for s in sales]
+    _validate_due_payment_rows(rows)
     notify(f"Writing {len(rows)} receipt PDF(s) under monthly folders in {receipts_root}")
     detail_excel = out / "bank_transactions_detailed.xlsx"
     summary_excel = out / "bank_transactions_summary.xlsx"
