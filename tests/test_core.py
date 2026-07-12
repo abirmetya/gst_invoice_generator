@@ -64,7 +64,7 @@ def test_row_to_bank_sale_treats_bank_amount_as_gst_inclusive():
         "Unit": "L",
         "Rate": "105",
         "Order_Value": "1050",
-        "Order_Ref": "ORD-1",
+        "Order_Ref": "ORD-20260624-0004",
         "Remarks": "IOB",
         "Unnamed_Remarks": "",
     }
@@ -272,7 +272,7 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
         "Unit": "L",
         "Rate": "105",
         "Order_Value": "1050",
-        "Order_Ref": "ORD-1",
+        "Order_Ref": "ORD-20260624-0004",
         "Remarks": "IOB",
         "Unnamed_Remarks": "",
     }
@@ -291,7 +291,7 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
 
     metadata = write_outputs([sale], config)
 
-    assert (tmp_path / "06" / "receipts" / "ORD-1.pdf").exists()
+    assert (tmp_path / "06" / "receipts" / "ORD-20260624-0001.pdf").exists()
     assert (tmp_path / "bank_transactions_summary.xlsx").exists()
     assert (tmp_path / "generation_metadata.json").exists()
     assert metadata["start_datetime"] == "2026-06-24T00:00:00"
@@ -313,6 +313,46 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
     assert summary_rows[0] == ("period", "start_datetime", "end_datetime", "transaction_count", "bank_amount", "taxable_value", "cgst", "sgst")
     assert summary_rows[1][0] == "06-June"
 
+
+
+def test_write_outputs_uses_continuous_daily_receipt_numbers(tmp_path):
+    pytest.importorskip("reportlab")
+    openpyxl = pytest.importorskip("openpyxl")
+    base = {
+        "Entry_Date": "2026-06-24",
+        "Phone": "9999999999",
+        "Customer_Name": "Acme",
+        "Address": "Billing Addr",
+        "Item_Type": "Milk",
+        "Qty_Ordered": "10",
+        "Unit": "L",
+        "Rate": "105",
+        "Order_Value": "1050",
+        "Remarks": "IOB",
+        "Unnamed_Remarks": "",
+    }
+    first_sale = row_to_bank_sale({**base, "Order_Ref": "ORD-20260624-0001"}, "Daily_Operations_2026-06-24", "Shop Addr")
+    second_sale = row_to_bank_sale({**base, "Order_Ref": "ORD-20260624-0004"}, "Daily_Operations_2026-06-24", "Shop Addr")
+    config = RequestConfig(
+        credentials_file="creds.json",
+        drive_path="Google_Business_Data/Daily_Operation",
+        year=2026,
+        start_month=6,
+        end_month=6,
+        output_dir=str(tmp_path),
+        seller_name="Shop",
+        seller_gstin="GSTIN",
+        selling_address="Shop Addr",
+    )
+
+    write_outputs([first_sale, second_sale], config)
+
+    assert (tmp_path / "06" / "receipts" / "ORD-20260624-0001.pdf").exists()
+    assert (tmp_path / "06" / "receipts" / "ORD-20260624-0002.pdf").exists()
+    workbook = openpyxl.load_workbook(tmp_path / "bank_transactions_detailed.xlsx", read_only=True, data_only=True)
+    detail_rows = list(workbook.active.iter_rows(values_only=True))
+    workbook.close()
+    assert [row[0] for row in detail_rows[1:]] == ["ORD-20260624-0001", "ORD-20260624-0002"]
 
 
 def test_write_outputs_keeps_original_and_department_excel_values(tmp_path):
@@ -618,12 +658,12 @@ def test_write_outputs_appends_detail_and_summary_workbooks(tmp_path):
         "Unit": "L",
         "Rate": "105",
         "Order_Value": "1050",
-        "Order_Ref": "ORD-1",
+        "Order_Ref": "ORD-20260624-0004",
         "Remarks": "IOB",
         "Unnamed_Remarks": "",
     }
     first_sale = row_to_bank_sale({**base, "Entry_Date": "2026-06-24"}, "Daily_Operations_2026-06-24", "Shop Addr")
-    second_sale = row_to_bank_sale({**base, "Entry_Date": "2026-07-01", "Order_Value": "2100", "Remarks": "IOB-2100"}, "Daily_Operations_2026-07-01", "Shop Addr")
+    second_sale = row_to_bank_sale({**base, "Entry_Date": "2026-07-01", "Order_Ref": "ORD-20260701-0010", "Order_Value": "2100", "Remarks": "IOB-2100"}, "Daily_Operations_2026-07-01", "Shop Addr")
     config = RequestConfig(
         credentials_file="creds.json",
         drive_path="Google_Business_Data/Daily_Operation",
@@ -646,7 +686,7 @@ def test_write_outputs_appends_detail_and_summary_workbooks(tmp_path):
     summary_rows = list(summary_workbook.active.iter_rows(values_only=True))
     summary_workbook.close()
 
-    assert [row[0] for row in detail_rows[1:]] == ["ORD-1", "ORD-1"]
+    assert [row[0] for row in detail_rows[1:]] == ["ORD-20260624-0001", "ORD-20260701-0001"]
     assert [row[0] for row in summary_rows] == ["period", "06-June", "07-July"]
 
 
