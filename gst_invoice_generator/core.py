@@ -550,10 +550,11 @@ def _receipt_pdf(path: Path, sale: BankSale, receipt_no: str, seller_name: str, 
     title.textColor = colors.HexColor("#12355B")
     small = styles_mod.ParagraphStyle("Small", parent=normal, fontSize=8, leading=10, textColor=colors.HexColor("#5D6975"))
     story: list[Any] = []
+    receipt_number = sale.order_ref or receipt_no
 
     story.append(platypus.Table(
         [[platypus.Paragraph(f"<b>{_para_text(seller_name)}</b><br/>{_para_text(sale.selling_address)}<br/>GSTIN: {_para_text(seller_gstin) or '-'}", normal),
-          platypus.Paragraph(f"<b>Tax Invoice / Sale Receipt</b><br/>Receipt No: {_para_text(receipt_no)}<br/>Date: {_para_text(sale.entry_date.isoformat() if sale.entry_date else '-')}<br/>Payment: Bank / IOB", normal)]],
+          platypus.Paragraph(f"<b>Tax Invoice / Sale Receipt</b><br/>Receipt No: {_para_text(receipt_number)}<br/>Date: {_para_text(sale.entry_date.isoformat() if sale.entry_date else '-')}<br/>Payment: Bank / IOB", normal)]],
         colWidths=[105 * units.mm, 65 * units.mm],
         style=[
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F3F7FB")),
@@ -658,7 +659,6 @@ DEPARTMENT_HEADERS = [
     "adjusted_rate",
     "discount_before_tax",
     "order_ref",
-    "remarks",
 ]
 
 
@@ -721,6 +721,15 @@ def _validate_due_payment_rows(rows: list[dict[str, Any]]) -> None:
 def _receipt_number_value(receipt_no: Any) -> int:
     match = re.search(r"(\d+)$", str(receipt_no or ""))
     return int(match.group(1)) if match else 0
+
+
+def _safe_receipt_number(value: Any) -> str:
+    receipt_number = str(value or "").strip()
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", receipt_number).strip(".-_")
+
+
+def _receipt_number_for_sale(sale: BankSale, receipt_index: int) -> str:
+    return _safe_receipt_number(sale.order_ref) or f"BANK-{receipt_index:05d}"
 
 
 def _next_receipt_index(detail_excel: Path) -> int:
@@ -965,7 +974,7 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
     for sequence, row in enumerate(rows, start=1):
         receipt_index = next_receipt_index + sequence - 1
         sale = BankSale(**row)
-        receipt_no = f"BANK-{receipt_index:05d}"
+        receipt_no = _receipt_number_for_sale(sale, receipt_index)
         row["receipt_no"] = receipt_no
         receipts_dir = receipts_root / _receipt_month(sale, config) / "receipts"
         receipts_dir.mkdir(parents=True, exist_ok=True)

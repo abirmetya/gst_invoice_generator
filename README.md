@@ -21,9 +21,9 @@ For a configured year and month range, it reads each Google Sheet's `SALES_ENTRY
 
 For every detected bank transaction, the generator writes:
 
-- `receipts/BANK-00001.pdf`, `receipts/BANK-00002.pdf`, etc. — one professionally formatted PDF receipt per bank sale.
+- monthly `receipts/<Order_Ref>.pdf` files — one professionally formatted PDF receipt per bank sale, named from the source order reference so the exact receipt is easier to find.
 - `bank_transactions_detailed.xlsx` — transaction-level details including customer, item, original quantity/order value, bank-adjusted quantity/order value, bank amount, taxable value, CGST, SGST, source sheet, and remarks.
-- `bank_transactions_department.xlsx` — shareable transaction-level details with only bank-adjusted quantity/order value and without original values.
+- `bank_transactions_department.xlsx` — shareable transaction-level details with only bank-adjusted quantity/order value, a separate `order_ref` column, and no `remarks` column.
 - `bank_transactions_summary.xlsx` — the actual bank transaction start/end datetimes plus totals for transaction count, bank amount, taxable value, CGST, and SGST.
 - `generation_metadata.json` — append-only run history with metadata, totals, output paths, and the requested period used to detect and reuse an existing output.
 
@@ -174,10 +174,11 @@ outputs/apr-jun-2026/
 ├── bank_transactions_department.xlsx
 ├── bank_transactions_summary.xlsx
 ├── generation_metadata.json
-└── receipts/
-    ├── BANK-00001.pdf
-    ├── BANK-00002.pdf
-    └── ...
+└── 06/
+    └── receipts/
+        ├── ORD-20260624-0010.pdf
+        ├── ORD-20260624-0011.pdf
+        └── ...
 ```
 
 ## Development and tests
