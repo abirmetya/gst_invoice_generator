@@ -291,7 +291,7 @@ def test_write_outputs_creates_pdf_receipts_summary_datetime_and_metadata(tmp_pa
 
     metadata = write_outputs([sale], config)
 
-    assert (tmp_path / "06" / "receipts" / "BANK-00001.pdf").exists()
+    assert (tmp_path / "06" / "receipts" / "ORD-1.pdf").exists()
     assert (tmp_path / "bank_transactions_summary.xlsx").exists()
     assert (tmp_path / "generation_metadata.json").exists()
     assert metadata["start_datetime"] == "2026-06-24T00:00:00"
@@ -386,7 +386,6 @@ def test_write_outputs_keeps_original_and_department_excel_values(tmp_path):
         "adjusted_rate",
         "discount_before_tax",
         "order_ref",
-        "remarks",
     ]
     assert department_row["qty_ordered"] == 200
     assert department_row["original_item_type"] is None
@@ -647,7 +646,7 @@ def test_write_outputs_appends_detail_and_summary_workbooks(tmp_path):
     summary_rows = list(summary_workbook.active.iter_rows(values_only=True))
     summary_workbook.close()
 
-    assert [row[0] for row in detail_rows[1:]] == ["BANK-00001", "BANK-00002"]
+    assert [row[0] for row in detail_rows[1:]] == ["ORD-1", "ORD-1"]
     assert [row[0] for row in summary_rows] == ["period", "06-June", "07-July"]
 
 
