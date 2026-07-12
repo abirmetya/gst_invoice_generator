@@ -27,6 +27,7 @@ MONTH_NAMES = [
 ]
 SHEET_DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 ORDER_REF_PATTERN = re.compile(r"ORD-\d{8}-\d+")
+ORDER_REF_RECEIPT_PATTERN = re.compile(r"^(ORD-\d{8})-(\d+)$", re.IGNORECASE)
 SALES_COLUMNS = [
     "Entry_Date", "Phone", "Customer_Name", "Address", "Item_Type", "Qty_Ordered",
     "Unit", "Rate", "Order_Value", "Paid_Amount", "Due_Amount", "Order_Ref", "Remarks",
@@ -550,7 +551,7 @@ def _receipt_pdf(path: Path, sale: BankSale, receipt_no: str, seller_name: str, 
     title.textColor = colors.HexColor("#12355B")
     small = styles_mod.ParagraphStyle("Small", parent=normal, fontSize=8, leading=10, textColor=colors.HexColor("#5D6975"))
     story: list[Any] = []
-    receipt_number = sale.order_ref or receipt_no
+    receipt_number = receipt_no
 
     story.append(platypus.Table(
         [[platypus.Paragraph(f"<b>{_para_text(seller_name)}</b><br/>{_para_text(sale.selling_address)}<br/>GSTIN: {_para_text(seller_gstin) or '-'}", normal),
@@ -718,25 +719,32 @@ def _validate_due_payment_rows(rows: list[dict[str, Any]]) -> None:
             raise ValueError(f"Due-payment unit mismatch for order ref {row.get('order_ref') or '-'}")
 
 
-def _receipt_number_value(receipt_no: Any) -> int:
-    match = re.search(r"(\d+)$", str(receipt_no or ""))
-    return int(match.group(1)) if match else 0
-
-
 def _safe_receipt_number(value: Any) -> str:
     receipt_number = str(value or "").strip()
     return re.sub(r"[^A-Za-z0-9._-]+", "-", receipt_number).strip(".-_")
 
 
-def _receipt_number_for_sale(sale: BankSale, receipt_index: int) -> str:
-    return _safe_receipt_number(sale.order_ref) or f"BANK-{receipt_index:05d}"
+def _existing_receipt_counts(detail_excel: Path) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in _read_detail_rows(detail_excel):
+        receipt_no = _safe_receipt_number(row.get("receipt_no"))
+        if not receipt_no:
+            continue
+        match = ORDER_REF_RECEIPT_PATTERN.fullmatch(receipt_no)
+        prefix = match.group(1) if match else "BANK"
+        counts[prefix] = counts.get(prefix, 0) + 1
+    return counts
 
 
-def _next_receipt_index(detail_excel: Path) -> int:
-    existing_rows = _read_detail_rows(detail_excel)
-    if not existing_rows:
-        return 1
-    return max(_receipt_number_value(row.get("receipt_no")) for row in existing_rows) + 1
+def _receipt_number_for_sale(sale: BankSale, receipt_counts: dict[str, int]) -> str:
+    match = ORDER_REF_RECEIPT_PATTERN.fullmatch(_normalized_order_ref(sale.order_ref))
+    if match:
+        prefix, source_sequence = match.groups()
+        width = max(4, len(source_sequence))
+        receipt_counts[prefix] = receipt_counts.get(prefix, 0) + 1
+        return f"{prefix}-{receipt_counts[prefix]:0{width}d}"
+    receipt_counts["BANK"] = receipt_counts.get("BANK", 0) + 1
+    return f"BANK-{receipt_counts['BANK']:05d}"
 
 
 def _actual_transaction_window(rows: list[dict[str, Any]]) -> tuple[str, str]:
@@ -970,11 +978,10 @@ def write_outputs(sales: Iterable[BankSale], config: RequestConfig, progress_cal
     detail_excel = out / "bank_transactions_detailed.xlsx"
     summary_excel = out / "bank_transactions_summary.xlsx"
     department_excel = out / "bank_transactions_department.xlsx"
-    next_receipt_index = _next_receipt_index(detail_excel)
+    receipt_counts = _existing_receipt_counts(detail_excel)
     for sequence, row in enumerate(rows, start=1):
-        receipt_index = next_receipt_index + sequence - 1
         sale = BankSale(**row)
-        receipt_no = _receipt_number_for_sale(sale, receipt_index)
+        receipt_no = _receipt_number_for_sale(sale, receipt_counts)
         row["receipt_no"] = receipt_no
         receipts_dir = receipts_root / _receipt_month(sale, config) / "receipts"
         receipts_dir.mkdir(parents=True, exist_ok=True)
